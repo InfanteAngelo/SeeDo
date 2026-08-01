@@ -20,7 +20,7 @@ import cv2
 import scipy.signal
 import matplotlib.pyplot as plt
 
-from diffusers import StableDiffusionInpaintPipeline
+# from diffusers import StableDiffusionInpaintPipeline
 from sam2.build_sam import build_sam2_video_predictor
 
 # Grounding DINO
@@ -134,17 +134,28 @@ def parse_object_list(objects):
     return object_list
 
 
-def load_model_hf(repo_id, filename, ckpt_config_filename, device="cpu"):
+def load_model_hf(
+    repo_id, filename, ckpt_config_filename, device="cpu", text_encoder_path=None
+):
     cache_config_file = hf_hub_download(repo_id=repo_id, filename=ckpt_config_filename)
-
-    args = SLConfig.fromfile(cache_config_file)
-    model = build_model(args)
-    args.device = device
-
     cache_file = hf_hub_download(repo_id=repo_id, filename=filename)
-    checkpoint = torch.load(cache_file, map_location="cpu")
+    return load_groundingdino_model(
+        cache_config_file, cache_file, device, text_encoder_path
+    )
+
+
+def load_groundingdino_model(
+    config_file, checkpoint_file, device="cpu", text_encoder_path=None
+):
+    args = SLConfig.fromfile(config_file)
+    if text_encoder_path is not None:
+        args.text_encoder_type = text_encoder_path
+    args.device = device
+    model = build_model(args)
+
+    checkpoint = torch.load(checkpoint_file, map_location="cpu")
     log = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
-    print("Model loaded from {} \n => {}".format(cache_file, log))
+    print("Model loaded from {} \n => {}".format(checkpoint_file, log))
     _ = model.eval()
     return model
 
@@ -394,8 +405,22 @@ def process_mask_signal(mask_add, mask_min):
     plt.show()
 
 
-def main(input_video_path, output_video_path, key_frames, objects=None):
+def main(
+    input_video_path,
+    output_video_path,
+    key_frames,
+    objects=None,
+    grounding_config=None,
+    grounding_checkpoint=None,
+    bert_model=None,
+    sam_checkpoint="sam_vit_h_4b8939.pth",
+    sam2_checkpoint="segment-anything-2/checkpoints/sam2_hiera_large.pt",
+):
     key_frames = ast.literal_eval(key_frames)
+    if (grounding_config is None) != (grounding_checkpoint is None):
+        raise ValueError(
+            "--grounding_config and --grounding_checkpoint must be provided together"
+        )
 
     # First Part: Get object list manually or from the VLM.
     if objects is not None:
@@ -411,35 +436,40 @@ def main(input_video_path, output_video_path, key_frames, objects=None):
         num, obj_list = extract_num_object(object_list_response)
         print(f"Generated prompt: {obj_list}")
 
-    ckpt_repo_id = "ShilongLiu/GroundingDINO"
-    ckpt_filenmae = "groundingdino_swinb_cogcoor.pth"
-    ckpt_config_filename = "GroundingDINO_SwinB.cfg.py"
-
-    groundingdino_model = load_model_hf(
-        ckpt_repo_id, ckpt_filenmae, ckpt_config_filename
-    )
 
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if DEVICE.type == "cuda":
         torch.cuda.set_device(DEVICE)
+    if grounding_config is not None:
+        groundingdino_model = load_groundingdino_model(
+            grounding_config,
+            grounding_checkpoint,
+            device=str(DEVICE),
+            text_encoder_path=bert_model,
+        )
+    else:
+        groundingdino_model = load_model_hf(
+            "ShilongLiu/GroundingDINO",
+            "groundingdino_swinb_cogcoor.pth",
+            "GroundingDINO_SwinB.cfg.py",
+            device=str(DEVICE),
+            text_encoder_path=bert_model,
+        )
 
-    sam_checkpoint = "sam_vit_h_4b8939.pth"
     sam = build_sam(checkpoint=sam_checkpoint)
     sam.to(device=DEVICE)
     sam_predictor = SamPredictor(sam)
 
-    if DEVICE.type == "cpu":
-        float_type = torch.float32
-    else:
-        float_type = torch.float16
-
-    pipe = StableDiffusionInpaintPipeline.from_pretrained(
-        "stabilityai/stable-diffusion-2-inpainting",
-        torch_dtype=float_type,
-    )
-
-    if DEVICE.type != "cpu":
-        pipe = pipe.to(DEVICE)
+    # Stable Diffusion is not used by the current visual-prompting pipeline.
+    # Keep the original loading code available for future inpainting work, but
+    # do not download the model or allocate its memory during object tracking.
+    # float_type = torch.float32 if DEVICE.type == "cpu" else torch.float16
+    # pipe = StableDiffusionInpaintPipeline.from_pretrained(
+    #     "stabilityai/stable-diffusion-2-inpainting",
+    #     torch_dtype=float_type,
+    # )
+    # if DEVICE.type != "cpu":
+    #     pipe = pipe.to(DEVICE)
 
     video_path = input_video_path
     sample_freq = 16
@@ -519,7 +549,7 @@ def main(input_video_path, output_video_path, key_frames, objects=None):
     del groundingdino_model
     del sam
     del sam_predictor
-    del pipe
+    # del pipe
 
     if DEVICE.type == "cuda":
         torch.cuda.empty_cache()
@@ -533,7 +563,6 @@ def main(input_video_path, output_video_path, key_frames, objects=None):
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
-    sam2_checkpoint = "segment-anything-2/checkpoints/sam2_hiera_large.pt"
     model_cfg = "sam2_hiera_l.yaml"
 
     predictor = build_sam2_video_predictor(
@@ -726,6 +755,44 @@ if __name__ == "__main__":
         help="Comma-separated object names; skips OpenAI object discovery when set",
     )
 
+    parser.add_argument(
+        "--grounding_config",
+        type=str,
+        help="Local GroundingDINO config; requires --grounding_checkpoint",
+    )
+    parser.add_argument(
+        "--grounding_checkpoint",
+        type=str,
+        help="Local GroundingDINO checkpoint; requires --grounding_config",
+    )
+    parser.add_argument(
+        "--bert_model",
+        type=str,
+        help="Local BERT model directory used by GroundingDINO",
+    )
+    parser.add_argument(
+        "--sam_checkpoint",
+        type=str,
+        default="sam_vit_h_4b8939.pth",
+        help="Path to the SAM ViT-H checkpoint",
+    )
+    parser.add_argument(
+        "--sam2_checkpoint",
+        type=str,
+        default="segment-anything-2/checkpoints/sam2_hiera_large.pt",
+        help="Path to the SAM2 Hiera Large checkpoint",
+    )
+
     args = parser.parse_args()
 
-    main(args.input, args.output, args.key_frames, args.objects)
+    main(
+        args.input,
+        args.output,
+        args.key_frames,
+        objects=args.objects,
+        grounding_config=args.grounding_config,
+        grounding_checkpoint=args.grounding_checkpoint,
+        bert_model=args.bert_model,
+        sam_checkpoint=args.sam_checkpoint,
+        sam2_checkpoint=args.sam2_checkpoint,
+    )
