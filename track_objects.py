@@ -20,8 +20,6 @@ import cv2
 import scipy.signal
 import matplotlib.pyplot as plt
 
-from openai import OpenAI
-from VLM_CaP.src.key import mykey, projectkey
 from diffusers import StableDiffusionInpaintPipeline
 from sam2.build_sam import build_sam2_video_predictor
 
@@ -127,6 +125,13 @@ def extract_num_object(response_state):
     objects = [obj for obj in objects_list]
 
     return num, objects
+
+
+def parse_object_list(objects):
+    object_list = [obj.strip() for obj in objects.split(",") if obj.strip()]
+    if not object_list:
+        raise ValueError("--objects must contain at least one object name")
+    return object_list
 
 
 def load_model_hf(repo_id, filename, ckpt_config_filename, device="cpu"):
@@ -389,11 +394,22 @@ def process_mask_signal(mask_add, mask_min):
     plt.show()
 
 
-def main(input_video_path, output_video_path, key_frames):
+def main(input_video_path, output_video_path, key_frames, objects=None):
     key_frames = ast.literal_eval(key_frames)
 
-    # First Part: Get object list from first key_frame using VLM
-    client = OpenAI(api_key=projectkey)
+    # First Part: Get object list manually or from the VLM.
+    if objects is not None:
+        obj_list = parse_object_list(objects)
+        num = len(obj_list)
+        print(f"Using manually provided object list: {obj_list}")
+    else:
+        from openai import OpenAI
+        from VLM_CaP.src.key import projectkey
+
+        client = OpenAI(api_key=projectkey)
+        object_list_response = get_object_list(input_video_path, client)
+        num, obj_list = extract_num_object(object_list_response)
+        print(f"Generated prompt: {obj_list}")
 
     ckpt_repo_id = "ShilongLiu/GroundingDINO"
     ckpt_filenmae = "groundingdino_swinb_cogcoor.pth"
@@ -430,11 +446,6 @@ def main(input_video_path, output_video_path, key_frames):
     output_video_path = output_video_path
 
     frames = read_video(video_path)
-
-    object_list_response = get_object_list(video_path, client)
-
-    num, obj_list = extract_num_object(object_list_response)
-    print(f"Generated prompt: {obj_list}")
 
     # Second Part: Use GroundedSAM2 to track the objects
     # Parameters for GroundingDINO
@@ -709,7 +720,12 @@ if __name__ == "__main__":
     parser.add_argument("--input", type=str, help="Path to the input video")
     parser.add_argument("--output", type=str, help="Path to the output video")
     parser.add_argument("--key_frames", type=str, help="List of key frame indices as a string")
+    parser.add_argument(
+        "--objects",
+        type=str,
+        help="Comma-separated object names; skips OpenAI object discovery when set",
+    )
 
     args = parser.parse_args()
 
-    main(args.input, args.output, args.key_frames)
+    main(args.input, args.output, args.key_frames, args.objects)
