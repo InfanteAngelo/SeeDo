@@ -44,7 +44,6 @@ from segment_anything import build_sam, SamPredictor
 from huggingface_hub import hf_hub_download
 
 sys.path.append(os.path.join(os.getcwd(), "GroundingDINO"))
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 
 def image_to_base64(image):
@@ -405,6 +404,8 @@ def main(input_video_path, output_video_path, key_frames):
     )
 
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    if DEVICE.type == "cuda":
+        torch.cuda.set_device(DEVICE)
 
     sam_checkpoint = "sam_vit_h_4b8939.pth"
     sam = build_sam(checkpoint=sam_checkpoint)
@@ -422,7 +423,7 @@ def main(input_video_path, output_video_path, key_frames):
     )
 
     if DEVICE.type != "cpu":
-        pipe = pipe.to("cuda")
+        pipe = pipe.to(DEVICE)
 
     video_path = input_video_path
     sample_freq = 16
@@ -509,21 +510,23 @@ def main(input_video_path, output_video_path, key_frames):
     del sam_predictor
     del pipe
 
-    torch.cuda.empty_cache()
+    if DEVICE.type == "cuda":
+        torch.cuda.empty_cache()
     gc.collect()
 
     # Use bfloat16 for the entire notebook
-    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+    if DEVICE.type == "cuda":
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
 
-    if torch.cuda.get_device_properties(0).major >= 8:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        if torch.cuda.get_device_properties(DEVICE).major >= 8:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
     sam2_checkpoint = "segment-anything-2/checkpoints/sam2_hiera_large.pt"
     model_cfg = "sam2_hiera_l.yaml"
 
     predictor = build_sam2_video_predictor(
-        model_cfg, sam2_checkpoint, device="cuda:0"
+        model_cfg, sam2_checkpoint, device=DEVICE
     )
 
     # First Round for sampling
@@ -573,10 +576,12 @@ def main(input_video_path, output_video_path, key_frames):
     # Second Round for processing whole video
     del inference_state
     del predictor
-    torch.cuda.empty_cache()
-    torch.cuda.set_device(1)
+    if DEVICE.type == "cuda":
+        torch.cuda.empty_cache()
 
-    predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
+    predictor = build_sam2_video_predictor(
+        model_cfg, sam2_checkpoint, device=DEVICE
+    )
 
     video_dir = os.path.dirname(video_path) + "/" + video_path.split("/")[-1].split(".")[0]
     if not os.path.exists(video_dir):
