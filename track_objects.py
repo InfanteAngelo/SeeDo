@@ -85,24 +85,24 @@ def get_object_list(video_path, client):
         {
             "role": "system",
             "content": [
-                "You are a visual object detector. Your task is to count and identify the objects in the provided image that are on the desk. Focus on objects classified as grasped_objects and containers.",
-                "Do not include hand or gripper in your answer",
+                "You are a visual object detector whose output will be used directly as text queries for GroundingDINO.",
+                "Use only the exact detector labels 'cube' and 'storage bin'. Do not include colors, materials, synonyms, hands, grippers, people, the table, or background objects.",
             ],
         },
         {
             "role": "user",
             "content": [
-                "There are two kinds of objects, grasped_objects and containers in the environment. We only care about objects on the desk.",
-                "You must strictly follow the rules below: Even if there are multiple objects that appear identical, you must repeat their names in your answer according to their quantity. For example, if there are three wooden blocks, you must mention 'wooden block' three times in your answer."
-                "Be careful and accurate with the number. Do not miss or add additional object in your answer."
-                "Based on the input picture, answer:",
-                "1. How many objects are there in the environment?",
-                "2. What are these objects?",
-                "You should respond in the format of the following example:",
-                "Number: 3",
-                "Objects: red pepper, red tomato, white bowl",
+                "Inspect the physical objects visible on the desk and classify them using these rules:",
+                "1. Map every colored block, cuboid, or graspable block to the exact label 'cube'.",
+                "2. Map every bin, box, tray, container, or receptacle to the exact label 'storage bin'.",
+                "3. Count every physical instance separately and repeat its exact label once per instance.",
+                "4. Do not add objects that are not visible and do not use any label other than 'cube' or 'storage bin'.",
+                "Return exactly two lines and no additional explanation:",
+                "Number: <total number of instances>",
+                "Objects: <comma-separated detector labels, repeated once per instance>",
+                "Example:",
                 "Number: 4",
-                "Objects: wooden block, wooden block, wooden block, wooden block",
+                "Objects: cube, cube, storage bin, storage bin",
                 *map(lambda x: {"image": x, "resize": 768}, base64Frames[0:1]),
             ],
         },
@@ -426,6 +426,7 @@ def main(
     if objects is not None:
         obj_list = parse_object_list(objects)
         num = len(obj_list)
+        object_discovery_source = "manual"
         print(f"Using manually provided object list: {obj_list}")
     else:
         from openai import OpenAI
@@ -437,8 +438,19 @@ def main(
         client = OpenAI()
         object_list_response = get_object_list(input_video_path, client)
         num, obj_list = extract_num_object(object_list_response)
+        object_discovery_source = "openai"
         print(f"Generated prompt: {obj_list}")
 
+    parsed_object_count = len(obj_list)
+    print(
+        "Object discovery counts: "
+        f"reported={num}, parsed={parsed_object_count}"
+    )
+    if num != parsed_object_count:
+        print(
+            "WARNING: Reported object count does not match the parsed object list: "
+            f"reported={num}, parsed={parsed_object_count}"
+        )
 
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if DEVICE.type == "cuda":
@@ -491,6 +503,8 @@ def main(
     best_boxes = []
     best_phrases = []
     best_logits = []
+    best_detector_labels = []
+    grounding_counts = {}
 
     # Iterate over each object and select the box with highest confidence
     for obj, count in object_counts.items():
@@ -503,15 +517,25 @@ def main(
             device=DEVICE,
         )
 
-        if boxes.shape[0] > 0:
-            selected_count = min(
-                count, boxes.shape[0]
-            )  # If returned boxes are fewer than object count
-            for i in range(selected_count):
-                best_boxes.append(boxes[i].unsqueeze(0))
-                best_phrases.append(phrases[i])
-                best_logits.append(logits[i])
+        detected_count = int(boxes.shape[0])
+        selected_count = min(count, detected_count)
+        grounding_counts[obj] = {
+            "requested": count,
+            "detected": detected_count,
+            "selected": selected_count,
+        }
+        print(
+            f"GroundingDINO count for {obj!r}: requested={count}, "
+            f"detected={detected_count}, selected={selected_count}"
+        )
 
+        for i in range(selected_count):
+            best_boxes.append(boxes[i].unsqueeze(0))
+            best_phrases.append(phrases[i])
+            best_logits.append(logits[i])
+            best_detector_labels.append(obj)
+
+    selected_box_count = len(best_boxes)
     if best_boxes:
         best_boxes = torch.cat(best_boxes)
         best_logits = torch.stack(best_logits)
@@ -540,6 +564,7 @@ def main(
 
     masks = masks.cpu()
     masks_np = masks.numpy()
+    masks_before_filter = len(masks_np)
 
     h, w = masks_np[0][0].shape
     pixel_cnt = h * w
@@ -548,6 +573,40 @@ def main(
         if np.sum(masks_np[i][0]) > pixel_cnt * 0.3:
             indices_to_keep[i] = False
     masks_np = masks_np[indices_to_keep]
+    filtered_detector_labels = [
+        label
+        for label, keep in zip(best_detector_labels, indices_to_keep)
+        if keep
+    ]
+    masks_after_filter = len(masks_np)
+
+    track_id_map = {}
+    for track_id, (detector_label, mask) in enumerate(
+        zip(filtered_detector_labels, masks_np)
+    ):
+        mask_indices = np.argwhere(mask[0] > 0)
+        if len(mask_indices) == 0:
+            center = None
+        else:
+            avg_y, avg_x = np.mean(mask_indices, axis=0)
+            center = [int(avg_x), int(avg_y)]
+        track_id_map[track_id] = {
+            "detector_label": detector_label,
+            "initial_center": center,
+        }
+
+    print(f"TRACK_ID_MAP: {json.dumps(track_id_map, sort_keys=True)}")
+
+    count_diagnostics = {
+        "source": object_discovery_source,
+        "reported_objects": num,
+        "parsed_objects": parsed_object_count,
+        "requested_by_label": dict(object_counts),
+        "grounding_by_label": grounding_counts,
+        "selected_boxes": selected_box_count,
+        "masks_before_filter": masks_before_filter,
+        "masks_after_filter": masks_after_filter,
+    }
 
     del groundingdino_model
     del sam
@@ -664,6 +723,25 @@ def main(
             out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
             for i, out_obj_id in enumerate(out_obj_ids)
         }
+
+    tracked_counts = [len(segments) for segments in video_segments.values()]
+    count_diagnostics["tracked_objects_min"] = min(tracked_counts, default=0)
+    count_diagnostics["tracked_objects_max"] = max(tracked_counts, default=0)
+    comparable_counts = [
+        count_diagnostics["reported_objects"],
+        count_diagnostics["parsed_objects"],
+        count_diagnostics["selected_boxes"],
+        count_diagnostics["masks_after_filter"],
+        count_diagnostics["tracked_objects_min"],
+        count_diagnostics["tracked_objects_max"],
+    ]
+    count_diagnostics["count_consistent"] = len(set(comparable_counts)) == 1
+    print(f"COUNT_DIAGNOSTICS: {json.dumps(count_diagnostics, sort_keys=True)}")
+    if not count_diagnostics["count_consistent"]:
+        print(
+            "WARNING: Object counts differ across discovery, detection, "
+            "segmentation, or tracking; inspect COUNT_DIAGNOSTICS."
+        )
 
     # Third Part: Select key frames and compute center coordinates of masks
     key_frame_coordinates = {}
