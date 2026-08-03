@@ -3,7 +3,7 @@ import requests
 import os
 
 # OpenAI API Key
-api_key = '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'
+api_key = os.environ["OPENAI_API_KEY"]
 
 # Function to encode the image
 def encode_image(image_path):

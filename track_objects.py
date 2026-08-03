@@ -429,9 +429,12 @@ def main(
         print(f"Using manually provided object list: {obj_list}")
     else:
         from openai import OpenAI
-        from VLM_CaP.src.key import projectkey
 
-        client = OpenAI(api_key=projectkey)
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise RuntimeError(
+                "OPENAI_API_KEY is required when --objects is not provided"
+            )
+        client = OpenAI()
         object_list_response = get_object_list(input_video_path, client)
         num, obj_list = extract_num_object(object_list_response)
         print(f"Generated prompt: {obj_list}")

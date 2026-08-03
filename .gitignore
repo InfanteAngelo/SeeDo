@@ -43,3 +43,6 @@ VLM_CaP/bowl/
 VLM_CaP/robotiq_2f_85/
 VLM_CaP/ur5e/
 VLM_CaP/src/key.py
+.env
+.env.*
+!.env.example

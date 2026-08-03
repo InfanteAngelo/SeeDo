@@ -67,12 +67,14 @@ def load_image_from_array(image_array: np.array) -> Tuple[np.array, torch.Tensor
 Make sure you download it in the SeeDo folder.
 **`default` or `vit_h`: [ViT-H SAM model.](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth)**
 
-- Obtain an OpenAI API key and create a `key.py` file under `VLM_CaP/src`
+- Obtain an OpenAI API key and expose it through the standard
+  `OPENAI_API_KEY` environment variable. Never store or commit the key in this
+  repository.
 
-```python
-cd VLM_CaP/src
-touch key.py
-echo 'projectkey = "YOUR_OPENAI_API_KEY"' > key.py
+```bash
+read -rsp "OpenAI API key: " OPENAI_API_KEY
+echo
+export OPENAI_API_KEY
 ```
 
 ## Pipeline
