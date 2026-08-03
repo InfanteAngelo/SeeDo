@@ -392,7 +392,7 @@ def process_mask_signal(mask_add, mask_min):
     plt.show()
 
     fig, axes = plt.subplots(n, 1, figsize=(10, 5 * n), sharex=True, sharey=True)
-    axes = axes.flatten()
+    axes = np.atleast_1d(axes).flatten()
     index = 0
 
     final_result = {}
