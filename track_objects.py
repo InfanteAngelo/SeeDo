@@ -134,6 +134,51 @@ def parse_object_list(objects):
     return object_list
 
 
+def filter_oversized_storage_bin_detections(
+    boxes, logits, phrases, detector_label, width_ratio=1.8, min_candidates=3
+):
+    diagnostics = {
+        "applied": False,
+        "width_ratio": width_ratio,
+        "candidate_count": int(boxes.shape[0]),
+        "removed_count": 0,
+        "removed_indices": [],
+    }
+    if detector_label != "storage bin" or boxes.shape[0] < min_candidates:
+        return boxes, logits, phrases, diagnostics
+
+    widths = boxes[:, 2]
+    median_width = torch.median(widths)
+    if median_width.item() <= 0:
+        return boxes, logits, phrases, diagnostics
+
+    width_threshold = median_width * width_ratio
+    keep_mask = widths <= width_threshold
+    removed_indices = (
+        (~keep_mask).nonzero(as_tuple=False).flatten().detach().cpu().tolist()
+    )
+    diagnostics.update(
+        {
+            "applied": True,
+            "median_width": float(median_width.item()),
+            "width_threshold": float(width_threshold.item()),
+            "candidate_widths": [
+                float(value) for value in widths.detach().cpu().tolist()
+            ],
+            "removed_count": len(removed_indices),
+            "removed_indices": removed_indices,
+        }
+    )
+    if not removed_indices:
+        return boxes, logits, phrases, diagnostics
+
+    keep_values = keep_mask.detach().cpu().tolist()
+    filtered_phrases = [
+        phrase for phrase, keep in zip(phrases, keep_values) if keep
+    ]
+    return boxes[keep_mask], logits[keep_mask], filtered_phrases, diagnostics
+
+
 def load_model_hf(
     repo_id, filename, ckpt_config_filename, device="cpu", text_encoder_path=None
 ):
@@ -505,6 +550,7 @@ def main(
     best_logits = []
     best_detector_labels = []
     grounding_counts = {}
+    width_filter_diagnostics = {}
 
     # Iterate over each object and select the box with highest confidence
     for obj, count in object_counts.items():
@@ -517,17 +563,33 @@ def main(
             device=DEVICE,
         )
 
+        raw_detected_count = int(boxes.shape[0])
+        boxes, logits, phrases, width_filter = (
+            filter_oversized_storage_bin_detections(
+                boxes, logits, phrases, detector_label=obj
+            )
+        )
+        width_filter_diagnostics[obj] = width_filter
         detected_count = int(boxes.shape[0])
         selected_count = min(count, detected_count)
         grounding_counts[obj] = {
             "requested": count,
-            "detected": detected_count,
+            "detected": raw_detected_count,
+            "eligible_after_width_filter": detected_count,
+            "width_filter_removed": width_filter["removed_count"],
             "selected": selected_count,
         }
         print(
             f"GroundingDINO count for {obj!r}: requested={count}, "
-            f"detected={detected_count}, selected={selected_count}"
+            f"detected={raw_detected_count}, "
+            f"eligible_after_width_filter={detected_count}, "
+            f"selected={selected_count}"
         )
+        if width_filter["removed_count"]:
+            print(
+                "STORAGE_BIN_WIDTH_FILTER: "
+                f"{json.dumps(width_filter, sort_keys=True)}"
+            )
 
         for i in range(selected_count):
             best_boxes.append(boxes[i].unsqueeze(0))
@@ -603,6 +665,7 @@ def main(
         "parsed_objects": parsed_object_count,
         "requested_by_label": dict(object_counts),
         "grounding_by_label": grounding_counts,
+        "width_filter_by_label": width_filter_diagnostics,
         "selected_boxes": selected_box_count,
         "masks_before_filter": masks_before_filter,
         "masks_after_filter": masks_after_filter,
