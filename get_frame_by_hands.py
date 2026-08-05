@@ -13,8 +13,14 @@ import time
 from pathlib import Path
 from argparse import ArgumentParser
 import csv
+from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+
+import numpy as np
+from results import FrameExtractorResult
+
 
 class FrameExtractor:
     def __init__(self, video_path, output_dir, gaussian_sigma=5, prominence=0.8, csv_file='new_wooden_block_selected_valleys.csv'):
@@ -95,7 +101,13 @@ class FrameExtractor:
 
         self.cap.release()
         print("All done!")
-        return [int(frame) for frame in selected_valleys]
+        
+        keyframes = tuple(int(frame) for frame in selected_valleys)
+
+        return FrameExtractorResult(
+            keyframes=keyframes,
+            keyframe_images=self._read_keyframe_images(keyframes),
+        )
 
     def save_selected_valleys_to_csv(self, selected_valleys):
         '''
@@ -403,15 +415,30 @@ class FrameExtractor:
         HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
         VisionRunningMode = mp.tasks.vision.RunningMode
 
+        hand_landmarker_path = (
+            Path(__file__).resolve().parent / "hand_landmarker.task"
+        )
+
         # Create a hand landmarker instance with the video mode:
+        # self.mp_hand_options = HandLandmarkerOptions(
+        #     base_options=BaseOptions(model_asset_path='./hand_landmarker.task'),
+        #     running_mode=VisionRunningMode.VIDEO,
+        #     num_hands=2,
+        #     min_hand_detection_confidence=0.2,
+        #     min_hand_presence_confidence=0.2,
+        #     min_tracking_confidence=0.2,
+        #     )
+
         self.mp_hand_options = HandLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path='./hand_landmarker.task'),
+            base_options=BaseOptions(
+                model_asset_path=str(hand_landmarker_path)
+            ),
             running_mode=VisionRunningMode.VIDEO,
             num_hands=2,
             min_hand_detection_confidence=0.2,
             min_hand_presence_confidence=0.2,
             min_tracking_confidence=0.2,
-            )
+        )
     
     def _visualization_init(self):
         '''
@@ -450,6 +477,50 @@ class FrameExtractor:
         # This folder will hold ALL valled frames extracted from the video.
         self.all_valleys_folder = self.base_folder / 'all_valleys'
         os.makedirs(self.all_valleys_folder, exist_ok=True)
+    
+    def _read_keyframe_images(
+        self,
+        keyframes: tuple[int, ...],
+    ) -> tuple[np.ndarray, ...]:
+        """Read the selected keyframes from the input video as RGB images."""
+
+        capture = cv2.VideoCapture(self.video_path)
+
+        if not capture.isOpened():
+            raise RuntimeError(
+                f"Cannot reopen video to read keyframes: {self.video_path}"
+            )
+
+        images: list[np.ndarray] = []
+
+        try:
+            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            for frame_index in keyframes:
+                if frame_index < 0 or frame_index >= frame_count:
+                    raise ValueError(
+                        f"Keyframe {frame_index} is outside the valid range "
+                        f"0..{frame_count - 1}"
+                    )
+
+                capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                success, frame_bgr = capture.read()
+
+                if not success or frame_bgr is None:
+                    raise RuntimeError(
+                        f"Cannot read keyframe {frame_index} "
+                        f"from video {self.video_path}"
+                    )
+
+                frame_rgb = cv2.cvtColor(
+                    frame_bgr,
+                    cv2.COLOR_BGR2RGB,
+                )
+                images.append(frame_rgb)
+        finally:
+            capture.release()
+
+        return tuple(images)
 
 
 def main(args):
