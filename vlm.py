@@ -167,13 +167,20 @@ def build_prompt(
         "annotated frames and the tracking evidence below. The domain contains "
         "cubes and storage bins. Use each frame only for its assigned role. Treat the "
         "initial-scene frame as general scene context only; do not use it to decide "
-        "the picked track ID, picked colour, or destination. In the pick-event frame, "
+        "the picked track ID or destination. In the pick-event frame, "
         "first identify the track ID of the cube physically grasped or manipulated by "
         "the hand. Do not select a cube merely because of its colour or position. "
         "After selecting that track ID, determine its colour exclusively from the "
-        "visible physical surface of that same cube in the pick-event frame. If its "
-        "surface colour cannot be determined there, report ambiguity instead of using "
-        "another frame. The bright green contour drawn around every tracked object is "
+        "visible physical surface of that same cube in the pick-event frame. "
+        "If, and only if, that same track ID is fully occluded by the hand/gripper or "
+        "otherwise has no visible surface in the pick-event frame, then and only then "
+        "read the colour from that identical track ID in the initial-scene frame instead. "
+        "Never use the initial-scene frame for colour if any part of the cube's surface "
+        "is visible in the pick-event frame. Never use the initial-scene frame to change "
+        "which track ID was selected — the track ID is fixed before this colour step and "
+        "never re-derived from the initial-scene frame. If the cube's surface is not "
+        "visible in either frame, report ambiguity. "
+        "The bright green contour drawn around every tracked object is "
         "an artificial annotation, not an object colour. Ignore contour pixels and "
         "never classify a cube as green merely because its contour is green. In the "
         "place-event frame, first obtain the centre of the picked cube and the centre "
@@ -221,7 +228,8 @@ def build_messages(
             "role": "system",
             "content": (
                 "You are the visual reasoning stage of a robot imitation system. "
-                "Use only the supplied visual and tracking evidence."
+                "Use only the supplied visual and tracking evidence. Follow the "
+                "required procedure in order and preserve track identity across frames."
             ),
         },
         {"role": "user", "content": content},
