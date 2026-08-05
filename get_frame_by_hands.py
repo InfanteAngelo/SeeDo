@@ -95,6 +95,7 @@ class FrameExtractor:
 
         self.cap.release()
         print("All done!")
+        return [int(frame) for frame in selected_valleys]
 
     def save_selected_valleys_to_csv(self, selected_valleys):
         '''
