@@ -17,6 +17,8 @@ from typing import Any
 
 import cv2
 
+from results import ActionPlanningResult, ActionStep
+
 DEFAULT_MODEL = "gpt-4o-2024-08-06"
 KEYFRAME_RE = re.compile(r"The selected valley frames are:\s*\[([^\]]*)\]")
 TRACK_MAP_RE = re.compile(r"^TRACK_ID_MAP:\s*(\{.*\})\s*$", re.MULTILINE)
@@ -265,89 +267,392 @@ def validate_plan(
 def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
+def generate_action_plan(
+    annotated_video_path: str | Path,
+    keyframes: tuple[int, int],
+    track_id_map: dict[int, dict[str, object]],
+    key_frame_coordinates: dict[str, list[str]],
+    artifacts_dir: str | Path,
+    model: str = DEFAULT_MODEL,
+    dry_run: bool = False,
+) -> ActionPlanningResult:
+    """Generate a structured action plan from visual-prompting outputs."""
 
-def run(args: argparse.Namespace) -> int:
-    video_path = args.input.resolve()
-    keyframe_log = args.keyframe_log.resolve()
-    visual_log = args.visual_prompting_log.resolve()
-    output_dir = args.output_dir.resolve()
-    for path in (video_path, keyframe_log, visual_log):
-        if not path.is_file() or path.stat().st_size == 0:
-            raise ValueError(f"Missing or empty input: {path}")
+    video_path = Path(annotated_video_path).expanduser().resolve()
+    output_dir = Path(artifacts_dir).expanduser().resolve()
 
-    pick_frame, place_frame = read_selected_keyframes(keyframe_log)
+    if not video_path.is_file():
+        raise FileNotFoundError(
+            f"Annotated video does not exist: {video_path}"
+        )
+
+    if video_path.stat().st_size == 0:
+        raise ValueError(
+            f"Annotated video is empty: {video_path}"
+        )
+
+    normalized_keyframes = tuple(int(frame) for frame in keyframes)
+
+    if len(normalized_keyframes) != 2:
+        raise ValueError(
+            "Action planning requires exactly two keyframes: "
+            "one pick frame and one place frame."
+        )
+
+    pick_frame, place_frame = normalized_keyframes
+
+    if pick_frame < 0 or place_frame < 0:
+        raise ValueError(
+            f"Keyframes cannot be negative: {normalized_keyframes}"
+        )
+
+    if pick_frame >= place_frame:
+        raise ValueError(
+            "The pick keyframe must precede the place keyframe: "
+            f"{normalized_keyframes}"
+        )
+
+    if not track_id_map:
+        raise ValueError(
+            "track_id_map cannot be empty."
+        )
+
+    if not key_frame_coordinates:
+        raise ValueError(
+            "key_frame_coordinates cannot be empty."
+        )
+
+    required_coordinate_keys = {
+        f"key_frame{pick_frame}",
+        f"key_frame{place_frame}",
+    }
+
+    missing_coordinate_keys = (
+        required_coordinate_keys
+        - set(key_frame_coordinates.keys())
+    )
+
+    if missing_coordinate_keys:
+        raise ValueError(
+            "Missing coordinates for keyframes: "
+            f"{sorted(missing_coordinate_keys)}"
+        )
+
+    normalized_track_map = {
+        str(track_id): dict(track_info)
+        for track_id, track_info in track_id_map.items()
+    }
+
+    normalized_coordinates: dict[str, dict[str, list[int]]] = {}
+
+    for frame_index in normalized_keyframes:
+        frame_key = f"key_frame{frame_index}"
+        frame_coordinates: dict[str, list[int]] = {}
+
+        for coordinate in key_frame_coordinates[frame_key]:
+            match = COORD_RE.fullmatch(coordinate.strip())
+
+            if match is None:
+                raise ValueError(
+                    "Invalid key-frame coordinate entry: "
+                    f"{coordinate!r}"
+                )
+
+            frame_coordinates[match.group("id")] = [
+                int(match.group("x")),
+                int(match.group("y")),
+            ]
+
+        if not frame_coordinates:
+            raise ValueError(
+                f"No valid coordinates found for {frame_key}."
+            )
+
+        normalized_coordinates[str(frame_index)] = (
+            frame_coordinates
+        )
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     ordered_frames = [0, pick_frame, place_frame]
-    track_map, coordinates = read_visual_prompting_log(visual_log)
-    missing = [frame for frame in (pick_frame, place_frame) if str(frame) not in coordinates]
-    if missing:
-        raise ValueError(f"Visual-prompting coordinates are missing for frames {missing}")
-    frame_count, fps = inspect_video(video_path, ordered_frames)
-    prompt = build_prompt(pick_frame, place_frame, track_map, coordinates)
+
+    frame_count, fps = inspect_video(
+        video_path,
+        ordered_frames,
+    )
+
+    prompt = build_prompt(
+        pick_frame=pick_frame,
+        place_frame=place_frame,
+        track_map=normalized_track_map,
+        coordinates=normalized_coordinates,
+    )
+
     manifest = {
-        "status": "dry_run_validated" if args.dry_run else "ready_for_openai",
-        "model": args.model,
+        "status": (
+            "dry_run_validated"
+            if dry_run
+            else "ready_for_openai"
+        ),
+        "model": model,
         "input_video": str(video_path),
         "input_sha256": sha256_file(video_path),
-        "keyframe_log": str(keyframe_log),
-        "visual_prompting_log": str(visual_log),
-        "frame_roles": {"initial": 0, "pick": pick_frame, "place": place_frame},
+        "frame_roles": {
+            "initial": 0,
+            "pick": pick_frame,
+            "place": place_frame,
+        },
         "video_frame_count": frame_count,
         "video_fps": fps,
-        "track_ids": sorted(int(track_id) for track_id in track_map),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "track_ids": sorted(
+            int(track_id)
+            for track_id in normalized_track_map
+        ),
+        "created_at_utc": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
-    if args.dry_run:
+
+    write_json(
+        output_dir / "input_manifest.json",
+        manifest,
+    )
+
+    (output_dir / "prompt.txt").write_text(
+        prompt + "\n"
+    )
+
+    if dry_run:
         print(json.dumps(manifest, indent=2, sort_keys=True))
         print("Dry run completed: no OpenAI request was made.")
-        return 0
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise ValueError("OPENAI_API_KEY is not configured")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    write_json(output_dir / "input_manifest.json", manifest)
-    (output_dir / "prompt.txt").write_text(prompt + "\n")
+        return ActionPlanningResult(
+            steps=(),
+            status="ambiguous",
+            ambiguities=(
+                "Dry run completed without generating an action plan.",
+            ),
+            natural_language_plan=(
+                "No action plan generated during dry run."
+            ),
+        )
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise ValueError(
+            "OPENAI_API_KEY is not configured."
+        )
+
     try:
-        frames = extract_frames(video_path, ordered_frames)
-        messages = build_messages(prompt, frames, ordered_frames)
+        frames = extract_frames(
+            video_path,
+            ordered_frames,
+        )
+
+        messages = build_messages(
+            prompt,
+            frames,
+            ordered_frames,
+        )
+
         from openai import OpenAI
 
         response = OpenAI().chat.completions.create(
-            model=args.model,
+            model=model,
             messages=messages,
             temperature=0,
             max_tokens=800,
-            response_format={"type": "json_schema", "json_schema": PLAN_SCHEMA},
+            response_format={
+                "type": "json_schema",
+                "json_schema": PLAN_SCHEMA,
+            },
         )
+
         raw_output = response.choices[0].message.content
+
         if not raw_output:
-            refusal = getattr(response.choices[0].message, "refusal", None)
-            raise ValueError(f"OpenAI returned no plan. Refusal: {refusal}")
+            refusal = getattr(
+                response.choices[0].message,
+                "refusal",
+                None,
+            )
+
+            raise ValueError(
+                "OpenAI returned no plan. "
+                f"Refusal: {refusal}"
+            )
+
         plan = json.loads(raw_output)
-        validate_plan(plan, pick_frame, place_frame, track_map)
+
+        validate_plan(
+            plan=plan,
+            pick_frame=pick_frame,
+            place_frame=place_frame,
+            track_map=normalized_track_map,
+        )
+
     except Exception as error:
         manifest["status"] = "failed"
         manifest["error_type"] = type(error).__name__
         manifest["error"] = str(error)
-        write_json(output_dir / "input_manifest.json", manifest)
+
+        write_json(
+            output_dir / "input_manifest.json",
+            manifest,
+        )
+
         raise
 
     manifest["status"] = "completed"
     manifest["openai_response_id"] = response.id
-    manifest["usage"] = response.usage.model_dump() if response.usage else None
-    write_json(output_dir / "input_manifest.json", manifest)
-    (output_dir / "raw_response.json").write_text(raw_output.rstrip() + "\n")
-    write_json(output_dir / "action_plan.json", plan)
-    if plan["steps"]:
+    manifest["usage"] = (
+        response.usage.model_dump()
+        if response.usage
+        else None
+    )
+
+    write_json(
+        output_dir / "input_manifest.json",
+        manifest,
+    )
+
+    (output_dir / "raw_response.json").write_text(
+        raw_output.rstrip() + "\n"
+    )
+
+    write_json(
+        output_dir / "action_plan.json",
+        plan,
+    )
+
+    action_steps = tuple(
+        ActionStep(
+            pick_keyframe=int(step["pick_keyframe"]),
+            place_keyframe=int(step["place_keyframe"]),
+            picked_track_id=int(step["picked_track_id"]),
+            picked_category=str(step["picked_category"]),
+            picked_color=str(step["picked_color"]),
+            destination_track_id=int(
+                step["destination_track_id"]
+            ),
+            destination_category=str(
+                step["destination_category"]
+            ),
+            destination_ordinal_from_left=int(
+                step["destination_ordinal_from_left"]
+            ),
+            relation=str(step["relation"]),
+            action=str(step["action"]),
+        )
+        for step in plan["steps"]
+    )
+
+    if action_steps:
         natural_language_plan = " and then ".join(
-            step["action"] for step in plan["steps"]
+            step.action
+            for step in action_steps
         )
     else:
-        natural_language_plan = "No action plan generated: " + "; ".join(
-            plan["ambiguities"]
+        natural_language_plan = (
+            "No action plan generated: "
+            + "; ".join(plan["ambiguities"])
         )
-    (output_dir / "action_plan.txt").write_text(natural_language_plan + "\n")
-    print(f"Generated natural-language plan: {natural_language_plan}")
+
+    (output_dir / "action_plan.txt").write_text(
+        natural_language_plan + "\n"
+    )
+
+    result = ActionPlanningResult(
+        steps=action_steps,
+        status=str(plan["status"]),
+        ambiguities=tuple(
+            str(item)
+            for item in plan["ambiguities"]
+        ),
+        natural_language_plan=natural_language_plan,
+    )
+
+    print(
+        "Generated natural-language plan: "
+        f"{result.natural_language_plan}"
+    )
     print(f"Action plan written to {output_dir}")
+
+    return result
+
+def run(args: argparse.Namespace) -> int:
+    video_path = args.input.expanduser().resolve()
+    keyframe_log = args.keyframe_log.expanduser().resolve()
+    visual_log = args.visual_prompting_log.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
+
+    for path in (
+        video_path,
+        keyframe_log,
+        visual_log,
+    ):
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Input file does not exist: {path}"
+            )
+
+        if path.stat().st_size == 0:
+            raise ValueError(
+                f"Input file is empty: {path}"
+            )
+
+    pick_frame, place_frame = read_selected_keyframes(
+        keyframe_log
+    )
+
+    track_map, coordinates = read_visual_prompting_log(
+        visual_log
+    )
+
+    key_frame_coordinates: dict[str, list[str]] = {}
+
+    for frame_index in (
+        pick_frame,
+        place_frame,
+    ):
+        frame_key = str(frame_index)
+
+        if frame_key not in coordinates:
+            raise ValueError(
+                "Visual-prompting coordinates are missing "
+                f"for frame {frame_index}."
+            )
+
+        key_frame_coordinates[
+            f"key_frame{frame_index}"
+        ] = [
+            (
+                f"Object {track_id}: "
+                f"({position[0]}, {position[1]})"
+            )
+            for track_id, position
+            in coordinates[frame_key].items()
+        ]
+
+    generate_action_plan(
+        annotated_video_path=video_path,
+        keyframes=(
+            pick_frame,
+            place_frame,
+        ),
+        track_id_map={
+            int(track_id): dict(track_info)
+            for track_id, track_info
+            in track_map.items()
+        },
+        key_frame_coordinates=key_frame_coordinates,
+        artifacts_dir=output_dir,
+        model=args.model,
+        dry_run=args.dry_run,
+    )
+
     return 0
 
 

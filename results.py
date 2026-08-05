@@ -27,3 +27,23 @@ class VisualPromptingResult:
     key_frame_coordinates: dict[str, list[str]]
     bounding_box_summary: str
     count_diagnostics: dict[str, object]
+
+@dataclass(frozen=True)
+class ActionStep:
+    pick_keyframe: int
+    place_keyframe: int
+    picked_track_id: int
+    picked_category: str
+    picked_color: str
+    destination_track_id: int
+    destination_category: str
+    destination_ordinal_from_left: int
+    relation: str
+    action: str
+
+@dataclass(frozen=True)
+class ActionPlanningResult:
+    steps: tuple[ActionStep, ...]
+    status: str
+    ambiguities: tuple[str, ...]
+    natural_language_plan: str
