@@ -41,6 +41,10 @@ from segment_anything import build_sam, SamPredictor
 # Hugging Face Hub
 from huggingface_hub import hf_hub_download
 
+from results import VisualPromptingResult
+from pathlib import Path
+import subprocess
+
 sys.path.append(os.path.join(os.getcwd(), "GroundingDINO"))
 
 
@@ -449,10 +453,45 @@ def process_mask_signal(mask_add, mask_min):
 
     plt.show()
 
+def convert_video_to_h264(
+        input_path: str | Path,
+        output_path: str | Path,
+    ) -> None:
+        """Convert a video to H.264 for broader playback compatibility."""
 
-def main(
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            str(output_path),
+        ]
+
+        completed_process = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        if not Path(output_path).is_file():
+            raise RuntimeError(
+                f"H.264 video was not created: {output_path}"
+            )
+
+
+def run_visual_prompting(
     input_video_path,
     output_video_path,
+    artifacts_dir,
     key_frames,
     objects=None,
     grounding_config=None,
@@ -460,8 +499,12 @@ def main(
     bert_model=None,
     sam_checkpoint="sam_vit_h_4b8939.pth",
     sam2_checkpoint="segment-anything-2/checkpoints/sam2_hiera_large.pt",
-):
+):  
+
     key_frames = ast.literal_eval(key_frames)
+    artifacts_dir = os.path.abspath(artifacts_dir)
+    os.makedirs(artifacts_dir, exist_ok=True)
+
     if (grounding_config is None) != (grounding_checkpoint is None):
         raise ValueError(
             "--grounding_config and --grounding_checkpoint must be provided together"
@@ -487,6 +530,20 @@ def main(
         print(f"Generated prompt: {obj_list}")
 
     parsed_object_count = len(obj_list)
+
+    print(
+        "[visual_prompting] CUDA available after object discovery:",
+        torch.cuda.is_available(),
+    )
+    print(
+        "[visual_prompting] CUDA_VISIBLE_DEVICES after object discovery:",
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+    )
+    print(
+        "[visual_prompting] NVIDIA_VISIBLE_DEVICES after object discovery:",
+        os.environ.get("NVIDIA_VISIBLE_DEVICES"),
+    )
+
     print(
         "Object discovery counts: "
         f"reported={num}, parsed={parsed_object_count}"
@@ -497,9 +554,24 @@ def main(
             f"reported={num}, parsed={parsed_object_count}"
         )
 
-    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    if DEVICE.type == "cuda":
-        torch.cuda.set_device(DEVICE)
+    # DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    # if DEVICE.type == "cuda":
+    #     torch.cuda.set_device(DEVICE)
+
+    cuda_available = torch.cuda.is_available()
+
+    if not cuda_available:
+        raise RuntimeError(
+            "CUDA is not available. Visual prompting would fall back to CPU, "
+            "so the execution has been stopped."
+        )
+
+    DEVICE = torch.device("cuda:0")
+    torch.cuda.set_device(DEVICE)
+
+    print("[visual_prompting] Selected device:", DEVICE)
+    print("[visual_prompting] GPU:", torch.cuda.get_device_name(DEVICE))
+
     if grounding_config is not None:
         groundingdino_model = load_groundingdino_model(
             grounding_config,
@@ -694,12 +766,35 @@ def main(
         model_cfg, sam2_checkpoint, device=DEVICE
     )
 
+    try:
+        predictor_devices = {
+            str(parameter.device)
+            for parameter in predictor.parameters()
+        }
+        print(
+            "[visual_prompting] SAM2 predictor parameter devices:",
+            sorted(predictor_devices),
+        )
+    except Exception as error:
+        print(
+            "[visual_prompting] Could not inspect SAM2 parameter devices:",
+            error,
+        )
+
+
     # First Round for sampling
-    video_dir = (
-        os.path.dirname(video_path)
-        + f"/sample_freq_{sample_freq}_"
-        + video_path.split("/")[-1].split(".")[0]
+    # video_dir = (
+    #     os.path.dirname(video_path)
+    #     + f"/sample_freq_{sample_freq}_"
+    #     + video_path.split("/")[-1].split(".")[0]
+    # )
+    video_stem = os.path.splitext(os.path.basename(video_path))[0]
+
+    video_dir = os.path.join(
+        artifacts_dir,
+        f"sample_freq_{sample_freq}_{video_stem}",
     )
+
     if not os.path.exists(video_dir):
         video2jpg(video_path, video_dir, sample_freq)
 
@@ -726,6 +821,7 @@ def main(
             mask=masks_np[i][0],
         )
 
+    print("[visual_prompting] Starting sampled-video SAM2 propagation")
     # Run propagation throughout the video and collect the results in a dict
     video_segments = {}  # Contains the per-frame segmentation results
     for (
@@ -737,6 +833,7 @@ def main(
             out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
             for i, out_obj_id in enumerate(out_obj_ids)
         }
+    print("[visual_prompting] Sampled-video SAM2 propagation completed")
 
     # Second Round for processing whole video
     del inference_state
@@ -748,7 +845,28 @@ def main(
         model_cfg, sam2_checkpoint, device=DEVICE
     )
 
-    video_dir = os.path.dirname(video_path) + "/" + video_path.split("/")[-1].split(".")[0]
+    try:
+        predictor_devices = {
+            str(parameter.device)
+            for parameter in predictor.parameters()
+        }
+        print(
+            "[visual_prompting] SAM2 predictor parameter devices:",
+            sorted(predictor_devices),
+        )
+    except Exception as error:
+        print(
+            "[visual_prompting] Could not inspect SAM2 parameter devices:",
+            error,
+        )
+
+
+    # video_dir = os.path.dirname(video_path) + "/" + video_path.split("/")[-1].split(".")[0]
+    video_dir = os.path.join(
+        artifacts_dir,
+        video_stem,
+    )
+
     if not os.path.exists(video_dir):
         video2jpg(video_path, video_dir, 1)
 
@@ -776,6 +894,7 @@ def main(
                 mask=video_segments[frame_idx // sample_freq][k][0],
             )
 
+    print("[visual_prompting] Starting full-video SAM2 propagation")
     video_segments = {}
     for (
         out_frame_idx,
@@ -786,6 +905,7 @@ def main(
             out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
             for i, out_obj_id in enumerate(out_obj_ids)
         }
+    print("[visual_prompting] Full-video SAM2 propagation completed")
 
     tracked_counts = [len(segments) for segments in video_segments.values()]
     count_diagnostics["tracked_objects_min"] = min(tracked_counts, default=0)
@@ -845,7 +965,6 @@ def main(
 
     # Print the final bounding box string
     print(f"Bounding box extraction completed. Result:\n{bbx_string}")
-
     # Fourth Part: Append all the painted frames into a video
     painted_frames = []
     for i in range(len(frame_names)):
@@ -856,6 +975,7 @@ def main(
                 img, video_segments[i][k][0], contour_color=1, ann_obj_id=k
             )
         painted_frames.append(img)
+    
 
     mask_add = {}
     mask_min = {}
@@ -864,6 +984,17 @@ def main(
         mask_min[k] = []
 
     write_video(painted_frames, output_video_path, fps=30)
+
+    output_video_path = Path(output_video_path)
+
+    h264_output_path = output_video_path.with_name(
+        f"{output_video_path.stem}-h264.mp4"
+    )
+
+    convert_video_to_h264(
+        input_path=output_video_path,
+        output_path=h264_output_path,
+    )
 
     for i in range(len(frame_names) - 1):
         for k in video_segments[i].keys():
@@ -879,11 +1010,18 @@ def main(
 
             mask_add[k].append(add_cnt.item())
             mask_min[k].append(min_cnt.item())
-
-    process_mask_signal(mask_add, mask_min)
+    # process_mask_signal(mask_add, mask_min)
     # Return the final bounding box string
     print(bbx_string)
-    return bbx_string
+    # return bbx_string
+
+    return VisualPromptingResult(
+        annotated_video_path=h264_output_path,
+        track_id_map=track_id_map,
+        key_frame_coordinates=key_frame_coordinates,
+        bounding_box_summary=bbx_string,
+        count_diagnostics=count_diagnostics,
+    )
 
 
 if __name__ == "__main__":
@@ -929,10 +1067,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    main(
-        args.input,
-        args.output,
-        args.key_frames,
+    run_visual_prompting(
+        input_video_path=args.input,
+        output_video_path=args.output,
+        artifacts_dir=os.path.dirname(os.path.abspath(args.output)),
+        key_frames=args.key_frames,
         objects=args.objects,
         grounding_config=args.grounding_config,
         grounding_checkpoint=args.grounding_checkpoint,

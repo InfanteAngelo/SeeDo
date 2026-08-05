@@ -15,7 +15,7 @@ from argparse import ArgumentParser
 import csv
 from pathlib import Path
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 import numpy as np

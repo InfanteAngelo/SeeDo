@@ -19,15 +19,11 @@ class FrameExtractorResult:
 
 
 @dataclass(frozen=True)
-class KeyframeSelectionResult:
-    """Structured output produced by the keyframe-selection module.
+class VisualPromptingResult:
+    """Structured output produced by the SeeDo visual-prompting stage."""
 
-    Notes:
-        keyframe_images are NumPy arrays in RGB channel order.
-        artifacts_dir contains optional debug and inspection artifacts.
-    """
-
-    video_path: Path
-    keyframes: tuple[int, ...]
-    keyframe_images: tuple[np.ndarray, ...]
-    artifacts_dir: Path
+    annotated_video_path: Path
+    track_id_map: dict[int, dict[str, object]]
+    key_frame_coordinates: dict[str, list[str]]
+    bounding_box_summary: str
+    count_diagnostics: dict[str, object]
