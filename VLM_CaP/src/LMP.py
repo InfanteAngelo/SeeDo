@@ -17,6 +17,25 @@ from src.env import COLORS
 # openai keys
 from src.key import mykey, projectkey
 
+def _strip_markdown_code_fences(
+    code: str,
+) -> str:
+    """Remove optional Markdown fences around generated Python code."""
+
+    code = code.strip()
+
+    if not code.startswith("```"):
+        return code
+
+    lines = code.splitlines()
+
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+
+    return "\n".join(lines).strip()
 
 class LMP:
 
@@ -81,6 +100,15 @@ class LMP:
                 print(f"OpenAI API got err {e}")
                 print("Retrying after 10s.")
                 sleep(10)
+        
+        code_str = _strip_markdown_code_fences(
+            code_str
+        )
+
+        if not code_str.strip():
+            raise RuntimeError(
+                "The language model returned an empty Python program."
+            )
 
         if self._cfg["include_context"] and context != "":
             to_exec = f"{context}\n{code_str}"

@@ -752,160 +752,262 @@ def run_visual_prompting(
         torch.cuda.empty_cache()
     gc.collect()
 
-    # Use bfloat16 for the entire notebook
+    # Enable TF32 on supported NVIDIA GPUs.
     if DEVICE.type == "cuda":
-        torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
-
         if torch.cuda.get_device_properties(DEVICE).major >= 8:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
     model_cfg = "sam2_hiera_l.yaml"
 
-    predictor = build_sam2_video_predictor(
-        model_cfg, sam2_checkpoint, device=DEVICE
-    )
-
-    try:
-        predictor_devices = {
-            str(parameter.device)
-            for parameter in predictor.parameters()
-        }
-        print(
-            "[visual_prompting] SAM2 predictor parameter devices:",
-            sorted(predictor_devices),
-        )
-    except Exception as error:
-        print(
-            "[visual_prompting] Could not inspect SAM2 parameter devices:",
-            error,
+    # SAM2 is executed under BF16 autocast only.
+    #
+    # Do not manually call __enter__() on the autocast context:
+    # the context must be closed before returning to the rest of
+    # the SeeDo pipeline, otherwise subsequent CUDA models such as
+    # GroundingDINO inherit BF16 and may fail in custom CUDA ops.
+    with torch.autocast(
+        device_type="cuda",
+        dtype=torch.bfloat16,
+    ):
+        predictor = build_sam2_video_predictor(
+            model_cfg,
+            sam2_checkpoint,
+            device=DEVICE,
         )
 
+        try:
+            predictor_devices = {
+                str(parameter.device)
+                for parameter in predictor.parameters()
+            }
 
-    # First Round for sampling
-    # video_dir = (
-    #     os.path.dirname(video_path)
-    #     + f"/sample_freq_{sample_freq}_"
-    #     + video_path.split("/")[-1].split(".")[0]
-    # )
-    video_stem = os.path.splitext(os.path.basename(video_path))[0]
-
-    video_dir = os.path.join(
-        artifacts_dir,
-        f"sample_freq_{sample_freq}_{video_stem}",
-    )
-
-    if not os.path.exists(video_dir):
-        video2jpg(video_path, video_dir, sample_freq)
-
-    frame_names = [
-        p
-        for p in os.listdir(video_dir)
-        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
-    ]
-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
-
-    inference_state = predictor.init_state(video_path=video_dir)
-    predictor.reset_state(inference_state)
-
-    prompts = {}  # Hold all the clicks we add for visualization
-
-    ann_frame_idx = 0  # The frame index we interact with
-    ann_obj_id = 1  # Give a unique id to each object we interact with
-
-    for i in range(len(masks_np)):
-        _, out_obj_ids, out_mask_logits = predictor.add_new_mask(
-            inference_state=inference_state,
-            frame_idx=ann_frame_idx,
-            obj_id=i,
-            mask=masks_np[i][0],
-        )
-
-    print("[visual_prompting] Starting sampled-video SAM2 propagation")
-    # Run propagation throughout the video and collect the results in a dict
-    video_segments = {}  # Contains the per-frame segmentation results
-    for (
-        out_frame_idx,
-        out_obj_ids,
-        out_mask_logits,
-    ) in predictor.propagate_in_video(inference_state):
-        video_segments[out_frame_idx] = {
-            out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
-            for i, out_obj_id in enumerate(out_obj_ids)
-        }
-    print("[visual_prompting] Sampled-video SAM2 propagation completed")
-
-    # Second Round for processing whole video
-    del inference_state
-    del predictor
-    if DEVICE.type == "cuda":
-        torch.cuda.empty_cache()
-
-    predictor = build_sam2_video_predictor(
-        model_cfg, sam2_checkpoint, device=DEVICE
-    )
-
-    try:
-        predictor_devices = {
-            str(parameter.device)
-            for parameter in predictor.parameters()
-        }
-        print(
-            "[visual_prompting] SAM2 predictor parameter devices:",
-            sorted(predictor_devices),
-        )
-    except Exception as error:
-        print(
-            "[visual_prompting] Could not inspect SAM2 parameter devices:",
-            error,
-        )
-
-
-    # video_dir = os.path.dirname(video_path) + "/" + video_path.split("/")[-1].split(".")[0]
-    video_dir = os.path.join(
-        artifacts_dir,
-        video_stem,
-    )
-
-    if not os.path.exists(video_dir):
-        video2jpg(video_path, video_dir, 1)
-
-    frame_names = [
-        p
-        for p in os.listdir(video_dir)
-        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
-    ]
-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
-
-    inference_state = predictor.init_state(video_path=video_dir)
-    predictor.reset_state(inference_state)
-
-    prompts = {}
-
-    ann_frame_idx = 0
-    ann_obj_id = 1
-
-    for frame_idx in range(0, len(frame_names), sample_freq):
-        for k in video_segments[frame_idx // sample_freq].keys():
-            _, out_obj_ids, out_mask_logits = predictor.add_new_mask(
-                inference_state=inference_state,
-                frame_idx=frame_idx,
-                obj_id=k,
-                mask=video_segments[frame_idx // sample_freq][k][0],
+            print(
+                "[visual_prompting] SAM2 predictor parameter devices:",
+                sorted(predictor_devices),
             )
 
-    print("[visual_prompting] Starting full-video SAM2 propagation")
-    video_segments = {}
-    for (
-        out_frame_idx,
-        out_obj_ids,
-        out_mask_logits,
-    ) in predictor.propagate_in_video(inference_state):
-        video_segments[out_frame_idx] = {
-            out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
-            for i, out_obj_id in enumerate(out_obj_ids)
-        }
-    print("[visual_prompting] Full-video SAM2 propagation completed")
+        except Exception as error:
+            print(
+                "[visual_prompting] Could not inspect "
+                "SAM2 parameter devices:",
+                error,
+            )
+
+        # ------------------------------------------------------------
+        # First round: sampled-video propagation
+        # ------------------------------------------------------------
+
+        video_stem = os.path.splitext(
+            os.path.basename(video_path)
+        )[0]
+
+        video_dir = os.path.join(
+            artifacts_dir,
+            f"sample_freq_{sample_freq}_{video_stem}",
+        )
+
+        if not os.path.exists(video_dir):
+            video2jpg(
+                video_path,
+                video_dir,
+                sample_freq,
+            )
+
+        frame_names = [
+            p
+            for p in os.listdir(video_dir)
+            if os.path.splitext(p)[-1]
+            in [
+                ".jpg",
+                ".jpeg",
+                ".JPG",
+                ".JPEG",
+            ]
+        ]
+
+        frame_names.sort(
+            key=lambda p: int(
+                os.path.splitext(p)[0]
+            )
+        )
+
+        inference_state = predictor.init_state(
+            video_path=video_dir
+        )
+
+        predictor.reset_state(
+            inference_state
+        )
+
+        prompts = {}
+
+        ann_frame_idx = 0
+        ann_obj_id = 1
+
+        for i in range(len(masks_np)):
+            _, out_obj_ids, out_mask_logits = (
+                predictor.add_new_mask(
+                    inference_state=inference_state,
+                    frame_idx=ann_frame_idx,
+                    obj_id=i,
+                    mask=masks_np[i][0],
+                )
+            )
+
+        print(
+            "[visual_prompting] Starting "
+            "sampled-video SAM2 propagation"
+        )
+
+        video_segments = {}
+
+        for (
+            out_frame_idx,
+            out_obj_ids,
+            out_mask_logits,
+        ) in predictor.propagate_in_video(
+            inference_state
+        ):
+            video_segments[out_frame_idx] = {
+                out_obj_id: (
+                    out_mask_logits[i] > 0.0
+                )
+                .cpu()
+                .numpy()
+                for i, out_obj_id
+                in enumerate(out_obj_ids)
+            }
+
+        print(
+            "[visual_prompting] Sampled-video "
+            "SAM2 propagation completed"
+        )
+
+        # ------------------------------------------------------------
+        # Second round: full-video propagation
+        # ------------------------------------------------------------
+
+        del inference_state
+        del predictor
+
+        if DEVICE.type == "cuda":
+            torch.cuda.empty_cache()
+
+        predictor = build_sam2_video_predictor(
+            model_cfg,
+            sam2_checkpoint,
+            device=DEVICE,
+        )
+
+        try:
+            predictor_devices = {
+                str(parameter.device)
+                for parameter in predictor.parameters()
+            }
+
+            print(
+                "[visual_prompting] SAM2 predictor parameter devices:",
+                sorted(predictor_devices),
+            )
+
+        except Exception as error:
+            print(
+                "[visual_prompting] Could not inspect "
+                "SAM2 parameter devices:",
+                error,
+            )
+
+        video_dir = os.path.join(
+            artifacts_dir,
+            video_stem,
+        )
+
+        if not os.path.exists(video_dir):
+            video2jpg(
+                video_path,
+                video_dir,
+                1,
+            )
+
+        frame_names = [
+            p
+            for p in os.listdir(video_dir)
+            if os.path.splitext(p)[-1]
+            in [
+                ".jpg",
+                ".jpeg",
+                ".JPG",
+                ".JPEG",
+            ]
+        ]
+
+        frame_names.sort(
+            key=lambda p: int(
+                os.path.splitext(p)[0]
+            )
+        )
+
+        inference_state = predictor.init_state(
+            video_path=video_dir
+        )
+
+        predictor.reset_state(
+            inference_state
+        )
+
+        prompts = {}
+
+        ann_frame_idx = 0
+        ann_obj_id = 1
+
+        for frame_idx in range(
+            0,
+            len(frame_names),
+            sample_freq,
+        ):
+            for k in video_segments[
+                frame_idx // sample_freq
+            ].keys():
+                _, out_obj_ids, out_mask_logits = (
+                    predictor.add_new_mask(
+                        inference_state=inference_state,
+                        frame_idx=frame_idx,
+                        obj_id=k,
+                        mask=video_segments[
+                            frame_idx // sample_freq
+                        ][k][0],
+                    )
+                )
+
+        print(
+            "[visual_prompting] Starting "
+            "full-video SAM2 propagation"
+        )
+
+        video_segments = {}
+
+        for (
+            out_frame_idx,
+            out_obj_ids,
+            out_mask_logits,
+        ) in predictor.propagate_in_video(
+            inference_state
+        ):
+            video_segments[out_frame_idx] = {
+                out_obj_id: (
+                    out_mask_logits[i] > 0.0
+                )
+                .cpu()
+                .numpy()
+                for i, out_obj_id
+                in enumerate(out_obj_ids)
+            }
+
+        print(
+            "[visual_prompting] Full-video "
+            "SAM2 propagation completed"
+        )
 
     tracked_counts = [len(segments) for segments in video_segments.values()]
     count_diagnostics["tracked_objects_min"] = min(tracked_counts, default=0)
