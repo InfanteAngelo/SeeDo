@@ -80,63 +80,159 @@ class LMP:
         return prompt, use_query
 
     def __call__(self, query, context="", **kwargs):
-        prompt, use_query = self.build_prompt(query, context=context)
-        
+        prompt, use_query = self.build_prompt(
+            query,
+            context=context,
+        )
+
         message = [
-            {"role": "user", "content": prompt},
+            {
+                "role": "user",
+                "content": prompt,
+            },
         ]
+
+        max_empty_response_attempts = 3
+        empty_response_attempts = 0
 
         while True:
             try:
-                code_str = self._client.chat.completions.create(
-                    messages = message,
-                    stop=self._stop_tokens,
-                    temperature=self._cfg["temperature"],
-                    model=self._cfg["engine"],
-                    max_tokens=self._cfg["max_tokens"],
-                ).choices[0].message.content.strip()
-                break
-            except (openai.RateLimitError, openai.APIConnectionError) as e:
-                print(f"OpenAI API got err {e}")
-                print("Retrying after 10s.")
-                sleep(10)
-        
-        code_str = _strip_markdown_code_fences(
-            code_str
-        )
+                raw_code_str = (
+                    self._client.chat.completions.create(
+                        messages=message,
+                        stop=self._stop_tokens,
+                        temperature=self._cfg["temperature"],
+                        model=self._cfg["engine"],
+                        max_tokens=self._cfg["max_tokens"],
+                    )
+                    .choices[0]
+                    .message
+                    .content
+                )
 
-        if not code_str.strip():
-            raise RuntimeError(
-                "The language model returned an empty Python program."
+            except (
+                openai.RateLimitError,
+                openai.APIConnectionError,
+            ) as e:
+                print(
+                    f"OpenAI API got err {e}"
+                )
+                print(
+                    "Retrying after 10s."
+                )
+                sleep(10)
+                continue
+
+            code_str = (
+                raw_code_str or ""
+            ).strip()
+
+            code_str = _strip_markdown_code_fences(
+                code_str
             )
 
-        if self._cfg["include_context"] and context != "":
-            to_exec = f"{context}\n{code_str}"
-            to_log = f"{context}\n{use_query}\n{code_str}"
+            if code_str.strip():
+                break
+
+            empty_response_attempts += 1
+
+            print(
+                "LMP returned an empty Python program "
+                f"(attempt "
+                f"{empty_response_attempts}/"
+                f"{max_empty_response_attempts})."
+            )
+
+            if (
+                empty_response_attempts
+                >= max_empty_response_attempts
+            ):
+                raise RuntimeError(
+                    "The language model returned an empty "
+                    "Python program after "
+                    f"{max_empty_response_attempts} attempts."
+                )
+
+            print(
+                "Retrying LMP generation."
+            )
+
+        if (
+            self._cfg["include_context"]
+            and context != ""
+        ):
+            to_exec = (
+                f"{context}\n"
+                f"{code_str}"
+            )
+            to_log = (
+                f"{context}\n"
+                f"{use_query}\n"
+                f"{code_str}"
+            )
         else:
             to_exec = code_str
-            to_log = f"{use_query}\n{to_exec}"
+            to_log = (
+                f"{use_query}\n"
+                f"{to_exec}"
+            )
 
-        to_log_pretty = highlight(to_log, PythonLexer(), TerminalFormatter())
-        print(f"LMP {self._name} exec:\n\n{to_log_pretty}\n")
+        to_log_pretty = highlight(
+            to_log,
+            PythonLexer(),
+            TerminalFormatter(),
+        )
 
-        new_fs = self._lmp_fgen.create_new_fs_from_code(code_str)
-        self._variable_vars.update(new_fs)
+        print(
+            f"LMP {self._name} exec:"
+            f"\n\n{to_log_pretty}\n"
+        )
 
-        gvars = merge_dicts([self._fixed_vars, self._variable_vars])
+        new_fs = (
+            self._lmp_fgen
+            .create_new_fs_from_code(
+                code_str
+            )
+        )
+
+        self._variable_vars.update(
+            new_fs
+        )
+
+        gvars = merge_dicts(
+            [
+                self._fixed_vars,
+                self._variable_vars,
+            ]
+        )
+
         lvars = kwargs
 
         if not self._cfg["debug_mode"]:
-            print("to_exec: ", to_exec)
-            exec_safe(to_exec, gvars, lvars)
+            print(
+                "to_exec: ",
+                to_exec,
+            )
 
-        self.exec_hist += f"\n{to_exec}"
+            exec_safe(
+                to_exec,
+                gvars,
+                lvars,
+            )
+
+        self.exec_hist += (
+            f"\n{to_exec}"
+        )
 
         if self._cfg["maintain_session"]:
-            self._variable_vars.update(lvars)
+            self._variable_vars.update(
+                lvars
+            )
 
         if self._cfg["has_return"]:
-            return lvars[self._cfg["return_val_name"]]
+            return lvars[
+                self._cfg["return_val_name"]
+            ]
 
 
 class LMPFGen:
