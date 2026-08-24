@@ -47,6 +47,8 @@ import subprocess
 
 sys.path.append(os.path.join(os.getcwd(), "GroundingDINO"))
 
+from ai_controller.models.seedo_controller.timing_utils import TIMING
+
 
 def image_to_base64(image):
     buffered = BytesIO()
@@ -626,14 +628,20 @@ def run_visual_prompting(
 
     # Iterate over each object and select the box with highest confidence
     for obj, count in object_counts.items():
-        boxes, logits, phrases = predict(
-            model=groundingdino_model,
-            image=image,
-            caption=obj,
-            box_threshold=BOX_TRESHOLD,
-            text_threshold=TEXT_TRESHOLD,
-            device=DEVICE,
-        )
+
+        with TIMING.measure(
+            f"visual.grounding_dino.{obj}",
+            cuda=True,
+        ):
+
+            boxes, logits, phrases = predict(
+                model=groundingdino_model,
+                image=image,
+                caption=obj,
+                box_threshold=BOX_TRESHOLD,
+                text_threshold=TEXT_TRESHOLD,
+                device=DEVICE,
+            )
 
         raw_detected_count = int(boxes.shape[0])
         boxes, logits, phrases, width_filter = (
@@ -682,19 +690,23 @@ def run_visual_prompting(
     )
     annotated_frame = annotated_frame[..., ::-1]  # BGR to RGB
 
-    sam_predictor.set_image(image_source)
-    H, W, _ = image_source.shape
-    boxes_xyxy = box_ops.box_cxcywh_to_xyxy(best_boxes) * torch.Tensor([W, H, W, H])
+    with TIMING.measure(
+        "visual.sam",
+        cuda=True,
+    ):
+        sam_predictor.set_image(image_source)
+        H, W, _ = image_source.shape
+        boxes_xyxy = box_ops.box_cxcywh_to_xyxy(best_boxes) * torch.Tensor([W, H, W, H])
 
-    transformed_boxes = sam_predictor.transform.apply_boxes_torch(
-        boxes_xyxy, image_source.shape[:2]
-    ).to(DEVICE)
-    masks, _, _ = sam_predictor.predict_torch(
-        point_coords=None,
-        point_labels=None,
-        boxes=transformed_boxes,
-        multimask_output=False,
-    )
+        transformed_boxes = sam_predictor.transform.apply_boxes_torch(
+            boxes_xyxy, image_source.shape[:2]
+        ).to(DEVICE)
+        masks, _, _ = sam_predictor.predict_torch(
+            point_coords=None,
+            point_labels=None,
+            boxes=transformed_boxes,
+            multimask_output=False,
+        )
 
     masks = masks.cpu()
     masks_np = masks.numpy()
@@ -808,11 +820,15 @@ def run_visual_prompting(
         )
 
         if not os.path.exists(video_dir):
-            video2jpg(
-                video_path,
-                video_dir,
-                sample_freq,
-            )
+
+            with TIMING.measure(
+                "io.video2jpg_sampled"
+            ):
+                video2jpg(
+                    video_path,
+                    video_dir,
+                    sample_freq,
+                )
 
         frame_names = [
             p
@@ -862,22 +878,26 @@ def run_visual_prompting(
 
         video_segments = {}
 
-        for (
-            out_frame_idx,
-            out_obj_ids,
-            out_mask_logits,
-        ) in predictor.propagate_in_video(
-            inference_state
+        with TIMING.measure(
+            "visual.sam2_sampled",
+            cuda=True,
         ):
-            video_segments[out_frame_idx] = {
-                out_obj_id: (
-                    out_mask_logits[i] > 0.0
-                )
-                .cpu()
-                .numpy()
-                for i, out_obj_id
-                in enumerate(out_obj_ids)
-            }
+            for (
+                out_frame_idx,
+                out_obj_ids,
+                out_mask_logits,
+            ) in predictor.propagate_in_video(
+                inference_state
+            ):
+                video_segments[out_frame_idx] = {
+                    out_obj_id: (
+                        out_mask_logits[i] > 0.0
+                    )
+                    .cpu()
+                    .numpy()
+                    for i, out_obj_id
+                    in enumerate(out_obj_ids)
+                }
 
         print(
             "[visual_prompting] Sampled-video "
@@ -924,11 +944,15 @@ def run_visual_prompting(
         )
 
         if not os.path.exists(video_dir):
-            video2jpg(
-                video_path,
-                video_dir,
-                1,
-            )
+
+            with TIMING.measure(
+                "io.video2jpg_full"
+            ):
+                video2jpg(
+                    video_path,
+                    video_dir,
+                    1,
+                )
 
         frame_names = [
             p
@@ -986,23 +1010,27 @@ def run_visual_prompting(
         )
 
         video_segments = {}
-
-        for (
-            out_frame_idx,
-            out_obj_ids,
-            out_mask_logits,
-        ) in predictor.propagate_in_video(
-            inference_state
+        
+        with TIMING.measure(
+            "visual.sam2_full",
+            cuda=True,
         ):
-            video_segments[out_frame_idx] = {
-                out_obj_id: (
-                    out_mask_logits[i] > 0.0
-                )
-                .cpu()
-                .numpy()
-                for i, out_obj_id
-                in enumerate(out_obj_ids)
-            }
+            for (
+                out_frame_idx,
+                out_obj_ids,
+                out_mask_logits,
+            ) in predictor.propagate_in_video(
+                inference_state
+            ):
+                video_segments[out_frame_idx] = {
+                    out_obj_id: (
+                        out_mask_logits[i] > 0.0
+                    )
+                    .cpu()
+                    .numpy()
+                    for i, out_obj_id
+                    in enumerate(out_obj_ids)
+                }
 
         print(
             "[visual_prompting] Full-video "
@@ -1085,7 +1113,10 @@ def run_visual_prompting(
         mask_add[k] = []
         mask_min[k] = []
 
-    write_video(painted_frames, output_video_path, fps=30)
+    with TIMING.measure(
+        "io.write_annotated_video"
+    ):
+        write_video(painted_frames, output_video_path, fps=30)
 
     output_video_path = Path(output_video_path)
 
