@@ -91,25 +91,47 @@ def get_object_list(video_path, client):
         {
             "role": "system",
             "content": [
-                "You are a visual object detector whose output will be used directly as text queries for GroundingDINO.",
-                "Use only the exact detector labels 'cube' and 'storage bin'. Do not include colors, materials, synonyms, hands, grippers, people, the table, or background objects.",
+                (
+                    "You are a visual object detector whose output will be used "
+                    "directly as text queries for GroundingDINO."
+                ),
+                (
+                    "The scene contains colored cubes and storage bins. "
+                    "For every cube, include its visible color in the detector "
+                    "label using the exact form '<color> cube'. "
+                    "The only valid cube colors in this benchmark are:"
+                    "red, green, blue, and yellow."
+                    "For every cube, the detector label MUST therefore be exactly one of:"
+                    "'red cube', 'green cube', 'blue cube', or 'yellow cube'."
+                    "Do not use any other cube color.\n"
+                    "For every storage bin, always use the exact detector label "
+                    "'storage bin' without adding color, position, material, "
+                    "or other attributes."
+                ),
             ],
         },
         {
             "role": "user",
             "content": [
                 "Inspect the physical objects visible on the desk and classify them using these rules:",
-                "1. Map every colored block, cuboid, or graspable block to the exact label 'cube'.",
-                "2. Map every bin, box, tray, container, or receptacle to the exact label 'storage bin'.",
-                "3. Count every physical instance separately and repeat its exact label once per instance.",
-                "4. Do not add objects that are not visible and do not use any label other than 'cube' or 'storage bin'.",
+                "1. For every visible cube or graspable colored block, identify its visible color and return '<color> cube'.",
+                "2. Examples of valid cube labels are 'red cube', 'green cube', 'blue cube', and 'yellow cube'.",
+                "3. For every bin, box, tray, container, or receptacle, return exactly 'storage bin'.",
+                "4. Count every physical instance separately.",
+                "5. Repeat 'storage bin' once for every visible storage-bin instance.",
+                "6. Do not include hands, grippers, people, the table, or background objects.",
+                "7. Do not assign spatial descriptions such as 'first bin from the left' or 'second bin from the left'.",
+                "8. Do not add objects that are not visible.",
                 "Return exactly two lines and no additional explanation:",
                 "Number: <total number of instances>",
                 "Objects: <comma-separated detector labels, repeated once per instance>",
                 "Example:",
-                "Number: 4",
-                "Objects: cube, cube, storage bin, storage bin",
-                *map(lambda x: {"image": x, "resize": 768}, base64Frames[0:1]),
+                "Number: 6",
+                "Objects: red cube, green cube, storage bin, storage bin, storage bin, storage bin",
+                *map(
+                    lambda x: {"image": x, "resize": 768},
+                    base64Frames[0:1],
+                ),
             ],
         },
     ]
@@ -643,7 +665,24 @@ def run_visual_prompting(
                 device=DEVICE,
             )
 
+            # Remove implausibly large cube detections before selecting
+            # the highest-confidence candidates.
+            if "cube" in obj:
+                box_areas = boxes[:, 2] * boxes[:, 3]
+                keep_mask = box_areas < 0.1
+
+                boxes = boxes[keep_mask]
+                logits = logits[keep_mask]
+
+                keep_values = keep_mask.detach().cpu().tolist()
+                phrases = [
+                    phrase
+                    for phrase, keep in zip(phrases, keep_values)
+                    if keep
+                ]
+
         raw_detected_count = int(boxes.shape[0])
+
         boxes, logits, phrases, width_filter = (
             filter_oversized_storage_bin_detections(
                 boxes, logits, phrases, detector_label=obj
@@ -714,6 +753,7 @@ def run_visual_prompting(
 
     h, w = masks_np[0][0].shape
     pixel_cnt = h * w
+
     indices_to_keep = np.ones(len(masks_np), dtype=bool)
     for i in range(len(masks_np)):
         if np.sum(masks_np[i][0]) > pixel_cnt * 0.3:

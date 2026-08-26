@@ -172,19 +172,14 @@ def build_prompt(
         "the picked track ID or destination. In the pick-event frame, "
         "first identify the track ID of the cube physically grasped or manipulated by "
         "the hand. Do not select a cube merely because of its colour or position. "
-        "After selecting that track ID, determine its colour exclusively from the "
-        "visible physical surface of that same cube in the pick-event frame. "
-        "If, and only if, that same track ID is fully occluded by the hand/gripper or "
-        "otherwise has no visible surface in the pick-event frame, then and only then "
-        "read the colour from that identical track ID in the initial-scene frame instead. "
-        "Never use the initial-scene frame for colour if any part of the cube's surface "
-        "is visible in the pick-event frame. Never use the initial-scene frame to change "
-        "which track ID was selected — the track ID is fixed before this colour step and "
-        "never re-derived from the initial-scene frame. If the cube's surface is not "
-        "visible in either frame, report ambiguity. "
-        "The bright green contour drawn around every tracked object is "
-        "an artificial annotation, not an object colour. Ignore contour pixels and "
-        "never classify a cube as green merely because its contour is green. In the "
+        "After selecting the picked track ID, obtain the picked object's semantic "
+        "identity exclusively from that track ID's 'detector_label' in track_id_map. "
+        "Cube detector labels already contain the semantic colour in the exact form "
+        "'<colour> cube', for example 'red cube', 'green cube', 'blue cube', or "
+        "'yellow cube'. Do not visually infer, verify, or change the cube colour from "
+        "any video frame. The GroundingDINO detector label is the authoritative source "
+        "for the picked object's colour and category. Set picked_color to the colour "
+        "contained in that detector label and picked_category to 'cube'. In the "
         "place-event frame, first obtain the centre of the picked cube and the centre "
         "of every object labelled 'storage bin' from that frame's coordinates. For the "
         "relation 'in', select the storage-bin track ID that visually receives or "
@@ -262,6 +257,33 @@ def validate_plan(
     for field in ("picked_track_id", "destination_track_id"):
         if step.get(field) not in known_ids:
             raise ValueError(f"Unknown {field}: {step.get(field)}")
+
+    picked_track_id = str(step["picked_track_id"])
+    picked_info = track_map[picked_track_id]
+
+    detector_label = str(
+        picked_info.get("detector_label", "")
+    ).strip().lower()
+
+    if not detector_label.endswith(" cube"):
+        raise ValueError(
+            "Picked track does not have a semantic cube detector label: "
+            f"{detector_label!r}"
+        )
+
+    expected_color = detector_label.removesuffix(" cube").strip()
+
+    if step.get("picked_category", "").strip().lower() != "cube":
+        raise ValueError(
+            "picked_category must be 'cube' for the selected cube track"
+        )
+
+    if step.get("picked_color", "").strip().lower() != expected_color:
+        raise ValueError(
+            "picked_color does not match the GroundingDINO detector label: "
+            f"expected={expected_color!r}, "
+            f"received={step.get('picked_color')!r}"
+        )
 
 
 def write_json(path: Path, value: Any) -> None:
