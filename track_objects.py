@@ -635,8 +635,10 @@ def run_visual_prompting(
 
     # Second Part: Use GroundedSAM2 to track the objects
     # Parameters for GroundingDINO
-    BOX_TRESHOLD = 0.3
+    semantic_object_box_threshold = 0.20
+    default_box_threshold = 0.30
     TEXT_TRESHOLD = 0.25
+
     object_counts = Counter(obj_list)
 
     image_source, image = load_image_from_array(frames[0])
@@ -647,76 +649,699 @@ def run_visual_prompting(
     best_detector_labels = []
     grounding_counts = {}
     width_filter_diagnostics = {}
+    semantic_candidates = []
 
-    # Iterate over each object and select the box with highest confidence
+    # Run GroundingDINO for every semantic label discovered by the VLM.
+    #
+    # Storage bins keep the existing selection behaviour.
+    # Non-bin detections are collected first and then globally resolved
+    # using IoU so that the same physical object cannot receive multiple
+    # semantic labels.
     for obj, count in object_counts.items():
+
+        is_storage_bin = (
+            obj.strip().lower()
+            == "storage bin"
+        )
+
+        current_box_threshold = (
+            default_box_threshold
+            if is_storage_bin
+            else semantic_object_box_threshold
+        )
 
         with TIMING.measure(
             f"visual.grounding_dino.{obj}",
             cuda=True,
         ):
-
             boxes, logits, phrases = predict(
                 model=groundingdino_model,
                 image=image,
                 caption=obj,
-                box_threshold=BOX_TRESHOLD,
+                box_threshold=current_box_threshold,
                 text_threshold=TEXT_TRESHOLD,
                 device=DEVICE,
             )
 
-            # Remove implausibly large cube detections before selecting
-            # the highest-confidence candidates.
-            if "cube" in obj:
-                box_areas = boxes[:, 2] * boxes[:, 3]
-                keep_mask = box_areas < 0.1
+        print(
+            f"\n[DINO] {obj!r}: "
+            f"{len(boxes)} candidates"
+        )
 
-                boxes = boxes[keep_mask]
-                logits = logits[keep_mask]
+        for i, (box, logit) in enumerate(
+            zip(boxes, logits)
+        ):
+            print(
+                f"  [{i}] "
+                f"box={box.detach().cpu().tolist()} "
+                f"score="
+                f"{float(logit.detach().cpu().item()):.4f}"
+            )
 
-                keep_values = keep_mask.detach().cpu().tolist()
-                phrases = [
-                    phrase
-                    for phrase, keep in zip(phrases, keep_values)
-                    if keep
-                ]
+        # Reject implausibly large detections for every semantic
+        # non-bin object.
+        if not is_storage_bin:
+            box_areas = (
+                boxes[:, 2]
+                * boxes[:, 3]
+            )
 
-        raw_detected_count = int(boxes.shape[0])
+            keep_mask = (
+                box_areas < 0.1
+            )
+
+            boxes = boxes[
+                keep_mask
+            ]
+
+            logits = logits[
+                keep_mask
+            ]
+
+            keep_values = (
+                keep_mask
+                .detach()
+                .cpu()
+                .tolist()
+            )
+
+            phrases = [
+                phrase
+                for phrase, keep in zip(
+                    phrases,
+                    keep_values,
+                )
+                if keep
+            ]
+
+        raw_detected_count = int(
+            boxes.shape[0]
+        )
 
         boxes, logits, phrases, width_filter = (
             filter_oversized_storage_bin_detections(
-                boxes, logits, phrases, detector_label=obj
+                boxes,
+                logits,
+                phrases,
+                detector_label=obj,
             )
         )
-        width_filter_diagnostics[obj] = width_filter
-        detected_count = int(boxes.shape[0])
-        selected_count = min(count, detected_count)
-        grounding_counts[obj] = {
-            "requested": count,
-            "detected": raw_detected_count,
-            "eligible_after_width_filter": detected_count,
-            "width_filter_removed": width_filter["removed_count"],
-            "selected": selected_count,
-        }
-        print(
-            f"GroundingDINO count for {obj!r}: requested={count}, "
-            f"detected={raw_detected_count}, "
-            f"eligible_after_width_filter={detected_count}, "
-            f"selected={selected_count}"
+
+        width_filter_diagnostics[
+            obj
+        ] = width_filter
+
+        detected_count = int(
+            boxes.shape[0]
         )
+
         if width_filter["removed_count"]:
             print(
                 "STORAGE_BIN_WIDTH_FILTER: "
                 f"{json.dumps(width_filter, sort_keys=True)}"
             )
 
-        for i in range(selected_count):
-            best_boxes.append(boxes[i].unsqueeze(0))
-            best_phrases.append(phrases[i])
-            best_logits.append(logits[i])
-            best_detector_labels.append(obj)
+        # ------------------------------------------------------------
+        # Semantic non-bin objects
+        # ------------------------------------------------------------
+        if not is_storage_bin:
+
+            grounding_counts[obj] = {
+                "requested": count,
+                "detected": raw_detected_count,
+                "eligible_after_width_filter": detected_count,
+                "width_filter_removed": (
+                    width_filter[
+                        "removed_count"
+                    ]
+                ),
+                "selected": 0,
+            }
+
+            for box, logit, phrase in zip(
+                boxes,
+                logits,
+                phrases,
+            ):
+                semantic_candidates.append(
+                    {
+                        "label": obj,
+                        "box": box,
+                        "logit": logit,
+                        "phrase": phrase,
+                        "confidence": float(
+                            logit
+                            .detach()
+                            .cpu()
+                            .item()
+                        ),
+                    }
+                )
+
+            continue
+
+        # ------------------------------------------------------------
+        # Storage bins keep their current behaviour.
+        # ------------------------------------------------------------
+        selected_count = min(
+            count,
+            detected_count,
+        )
+
+        grounding_counts[obj] = {
+            "requested": count,
+            "detected": raw_detected_count,
+            "eligible_after_width_filter": detected_count,
+            "width_filter_removed": (
+                width_filter[
+                    "removed_count"
+                ]
+            ),
+            "selected": selected_count,
+        }
+
+        print(
+            f"GroundingDINO count for {obj!r}: "
+            f"requested={count}, "
+            f"detected={raw_detected_count}, "
+            f"eligible_after_width_filter={detected_count}, "
+            f"selected={selected_count}"
+        )
+
+        boxes = boxes[
+            :selected_count
+        ]
+
+        logits = logits[
+            :selected_count
+        ]
+
+        phrases = phrases[
+            :selected_count
+        ]
+
+        for box, logit, phrase in zip(
+            boxes,
+            logits,
+            phrases,
+        ):
+            best_boxes.append(
+                box.unsqueeze(0)
+            )
+
+            best_phrases.append(
+                phrase
+            )
+
+            best_logits.append(
+                logit
+            )
+
+            best_detector_labels.append(
+                obj
+            )
+
+    # ------------------------------------------------------------
+    # Resolve competing semantic detections globally.
+    # ------------------------------------------------------------
+    semantic_candidates.sort(
+        key=lambda candidate: candidate[
+            "confidence"
+        ],
+        reverse=True,
+    )
+
+    accepted_semantic = []
+
+    accepted_counts = {
+        label: 0
+        for label in object_counts
+        if (
+            label.strip().lower()
+            != "storage bin"
+        )
+    }
+
+    semantic_iou_threshold = 0.7
+
+    for candidate in semantic_candidates:
+
+        label = candidate[
+            "label"
+        ]
+
+        requested_count = (
+            object_counts[
+                label
+            ]
+        )
+
+        if (
+            accepted_counts[label]
+            >= requested_count
+        ):
+            continue
+
+        candidate_box_xyxy = (
+            box_ops.box_cxcywh_to_xyxy(
+                candidate[
+                    "box"
+                ].unsqueeze(0)
+            )
+        )
+
+        conflicting_detection = None
+        conflicting_iou = 0.0
+
+        for accepted in accepted_semantic:
+
+            accepted_box_xyxy = (
+                box_ops.box_cxcywh_to_xyxy(
+                    accepted[
+                        "box"
+                    ].unsqueeze(0)
+                )
+            )
+
+            iou_matrix, _ = (
+                box_ops.box_iou(
+                    candidate_box_xyxy,
+                    accepted_box_xyxy,
+                )
+            )
+
+            iou = float(
+                iou_matrix[
+                    0,
+                    0,
+                ]
+                .detach()
+                .cpu()
+                .item()
+            )
+
+            if (
+                iou
+                >= semantic_iou_threshold
+            ):
+                conflicting_detection = (
+                    accepted
+                )
+
+                conflicting_iou = iou
+                break
+
+        if (
+            conflicting_detection
+            is not None
+        ):
+            print(
+                "[visual_prompting] Semantic IoU conflict: "
+                f"{label!r} "
+                f"score="
+                f"{candidate['confidence']:.4f} "
+                "rejected because it overlaps "
+                f"{conflicting_detection['label']!r} "
+                "with "
+                f"score="
+                f"{conflicting_detection['confidence']:.4f}, "
+                f"IoU={conflicting_iou:.4f}"
+            )
+
+            continue
+
+        accepted_semantic.append(
+            candidate
+        )
+
+        accepted_counts[
+            label
+        ] += 1
+
+    # ------------------------------------------------------------
+    # FALLBACK FOR UNRESOLVED SEMANTIC LABELS
+    # ------------------------------------------------------------
+    for label, requested_count in object_counts.items():
+
+        if (
+            label.strip().lower()
+            == "storage bin"
+        ):
+            continue
+
+        resolved_count = accepted_counts[
+            label
+        ]
+
+        missing_count = (
+            requested_count
+            - resolved_count
+        )
+
+        if missing_count <= 0:
+            continue
+
+        print(
+            "[visual_prompting] Unresolved semantic label: "
+            f"{label!r}, "
+            f"requested={requested_count}, "
+            f"resolved={resolved_count}"
+        )
+
+        label_parts = (
+            label
+            .strip()
+            .lower()
+            .split()
+        )
+
+        if len(label_parts) < 2:
+            raise RuntimeError(
+                "Semantic detector label does not follow "
+                "the expected '<color> <object type>' format: "
+                f"{label!r}"
+            )
+
+        color = label_parts[0]
+        object_type = label_parts[-1]
+
+        fallback_queries = [
+            f"dark {color} {object_type}",
+            f"light {color} {object_type}",
+            object_type,
+        ]
+
+        for fallback_query in fallback_queries:
+
+            if missing_count <= 0:
+                break
+
+            print(
+                "[visual_prompting] Trying fallback: "
+                f"{label!r} -> {fallback_query!r}"
+            )
+
+            timing_query = (
+                fallback_query
+                .replace(" ", "_")
+            )
+
+            with TIMING.measure(
+                f"visual.grounding_dino.fallback_{timing_query}",
+                cuda=True,
+            ):
+                (
+                    fallback_boxes,
+                    fallback_logits,
+                    fallback_phrases,
+                ) = predict(
+                    model=groundingdino_model,
+                    image=image,
+                    caption=fallback_query,
+                    box_threshold=semantic_object_box_threshold,
+                    text_threshold=TEXT_TRESHOLD,
+                    device=DEVICE,
+                )
+
+            print(
+                f"[DINO FALLBACK] {label!r} "
+                f"using {fallback_query!r}: "
+                f"{len(fallback_boxes)} candidates"
+            )
+
+            for i, (box, logit) in enumerate(
+                zip(
+                    fallback_boxes,
+                    fallback_logits,
+                )
+            ):
+                print(
+                    f"  [{i}] "
+                    f"box={box.detach().cpu().tolist()} "
+                    f"score="
+                    f"{float(logit.detach().cpu().item()):.4f}"
+                )
+
+            if len(fallback_boxes) > 0:
+
+                box_areas = (
+                    fallback_boxes[:, 2]
+                    * fallback_boxes[:, 3]
+                )
+
+                keep_mask = (
+                    box_areas < 0.1
+                )
+
+                fallback_boxes = (
+                    fallback_boxes[
+                        keep_mask
+                    ]
+                )
+
+                fallback_logits = (
+                    fallback_logits[
+                        keep_mask
+                    ]
+                )
+
+                keep_values = (
+                    keep_mask
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+
+                fallback_phrases = [
+                    phrase
+                    for phrase, keep in zip(
+                        fallback_phrases,
+                        keep_values,
+                    )
+                    if keep
+                ]
+
+            fallback_candidates = [
+                {
+                    "label": label,
+                    "box": box,
+                    "logit": logit,
+                    "phrase": phrase,
+                    "confidence": float(
+                        logit
+                        .detach()
+                        .cpu()
+                        .item()
+                    ),
+                }
+                for box, logit, phrase in zip(
+                    fallback_boxes,
+                    fallback_logits,
+                    fallback_phrases,
+                )
+            ]
+
+            fallback_candidates.sort(
+                key=lambda candidate: candidate[
+                    "confidence"
+                ],
+                reverse=True,
+            )
+
+            for candidate in fallback_candidates:
+
+                if missing_count <= 0:
+                    break
+
+                candidate_box_xyxy = (
+                    box_ops.box_cxcywh_to_xyxy(
+                        candidate[
+                            "box"
+                        ].unsqueeze(0)
+                    )
+                )
+
+                conflict = False
+
+                # Do not reuse an already assigned semantic region.
+                for accepted in accepted_semantic:
+
+                    accepted_box_xyxy = (
+                        box_ops.box_cxcywh_to_xyxy(
+                            accepted[
+                                "box"
+                            ].unsqueeze(0)
+                        )
+                    )
+
+                    iou_matrix, _ = (
+                        box_ops.box_iou(
+                            candidate_box_xyxy,
+                            accepted_box_xyxy,
+                        )
+                    )
+
+                    iou = float(
+                        iou_matrix[
+                            0,
+                            0,
+                        ]
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+
+                    if (
+                        iou
+                        >= semantic_iou_threshold
+                    ):
+                        print(
+                            "[visual_prompting] "
+                            "Fallback candidate rejected: "
+                            f"{label!r} "
+                            f"query={fallback_query!r} "
+                            f"score="
+                            f"{candidate['confidence']:.4f} "
+                            "overlaps semantic object "
+                            f"{accepted['label']!r}, "
+                            f"IoU={iou:.4f}"
+                        )
+
+                        conflict = True
+                        break
+
+                if conflict:
+                    continue
+
+                # Do not claim a storage-bin region.
+                for (
+                    existing_box,
+                    existing_label,
+                ) in zip(
+                    best_boxes,
+                    best_detector_labels,
+                ):
+
+                    if (
+                        existing_label
+                        .strip()
+                        .lower()
+                        != "storage bin"
+                    ):
+                        continue
+
+                    existing_box_xyxy = (
+                        box_ops.box_cxcywh_to_xyxy(
+                            existing_box
+                        )
+                    )
+
+                    iou_matrix, _ = (
+                        box_ops.box_iou(
+                            candidate_box_xyxy,
+                            existing_box_xyxy,
+                        )
+                    )
+
+                    iou = float(
+                        iou_matrix[
+                            0,
+                            0,
+                        ]
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+
+                    if (
+                        iou
+                        >= semantic_iou_threshold
+                    ):
+                        print(
+                            "[visual_prompting] "
+                            "Fallback candidate rejected: "
+                            f"{label!r} "
+                            f"query={fallback_query!r} "
+                            f"score="
+                            f"{candidate['confidence']:.4f} "
+                            "overlaps storage bin, "
+                            f"IoU={iou:.4f}"
+                        )
+
+                        conflict = True
+                        break
+
+                if conflict:
+                    continue
+
+                print(
+                    "[visual_prompting] "
+                    "Fallback candidate accepted: "
+                    f"{label!r} "
+                    f"localized using "
+                    f"{fallback_query!r}, "
+                    f"score="
+                    f"{candidate['confidence']:.4f}"
+                )
+
+                accepted_semantic.append(
+                    candidate
+                )
+
+                accepted_counts[
+                    label
+                ] += 1
+
+                missing_count -= 1
+
+    # Add semantic detections only after IoU resolution and fallback attempts.
+    for candidate in accepted_semantic:
+
+        best_boxes.append(
+            candidate[
+                "box"
+            ].unsqueeze(0)
+        )
+
+        # Always preserve the original VLM label.
+        best_phrases.append(
+            candidate[
+                "label"
+            ]
+        )
+
+        best_logits.append(
+            candidate[
+                "logit"
+            ]
+        )
+
+        best_detector_labels.append(
+            candidate[
+                "label"
+            ]
+        )
+
+    for label, selected_count in (
+        accepted_counts.items()
+    ):
+        grounding_counts[
+            label
+        ][
+            "selected"
+        ] = selected_count
+
+        print(
+            f"GroundingDINO count for {label!r}: "
+            f"requested="
+            f"{grounding_counts[label]['requested']}, "
+            f"detected="
+            f"{grounding_counts[label]['detected']}, "
+            f"selected={selected_count}"
+        )
 
     selected_box_count = len(best_boxes)
+
     if best_boxes:
         best_boxes = torch.cat(best_boxes)
         best_logits = torch.stack(best_logits)
