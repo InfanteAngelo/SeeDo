@@ -151,7 +151,41 @@ def build_prompt(
     place_frame: int,
     track_map: dict[str, Any],
     coordinates: dict[str, Any],
+    demonstration_bin_order: str = "left_to_right",
 ) -> str:
+
+    demonstration_bin_order = (
+        str(demonstration_bin_order)
+        .strip()
+        .lower()
+    )
+
+    if demonstration_bin_order == "left_to_right":
+        bin_order_instruction = (
+            "Only after fixing the destination track ID, sort all storage bins "
+            "by their place-frame x coordinate in ascending order. "
+            "The destination ordinal is the one-based position of the selected "
+            "track ID in that sorted list: smallest x corresponds to the first "
+            "storage bin from the left in the canonical front view, the next "
+            "smallest x corresponds to the second, and so on. "
+        )
+
+    elif demonstration_bin_order == "right_to_left":
+        bin_order_instruction = (
+            "The demonstration is observed from the opposite side relative to "
+            "the canonical front view. Only after fixing the destination track ID, "
+            "sort all storage bins by their place-frame x coordinate in descending "
+            "order. The destination ordinal is the one-based position of the "
+            "selected track ID in that sorted list: largest x corresponds to the "
+            "first storage bin from the left in the canonical front view, the next "
+            "largest x corresponds to the second, and so on. "
+        )
+
+    else:
+        raise ValueError(
+            "Invalid demonstration_bin_order: "
+            f"{demonstration_bin_order!r}"
+        )
     evidence = {
         "frame_roles": {
             "0": "initial scene",
@@ -186,10 +220,8 @@ def build_prompt(
         "contains the cube and has the smallest centre-to-centre distance from it. "
         "When coordinates are available, compare all candidate distances and do not "
         "select a farther bin unless the image clearly contradicts the coordinates. "
-        "Only after fixing the destination track ID, sort all storage bins by their "
-        "place-frame x coordinate in ascending order. The destination ordinal is the "
-        "one-based position of the selected track ID in that sorted list: smallest x "
-        "is first from left, next is second from left, and so on. Never infer the "
+        + bin_order_instruction
+        + "Never infer the "
         "destination or its ordinal from track ID, JSON order, or list order. If the "
         "picked cube has no place-frame coordinates, or image and coordinates conflict, "
         "report ambiguity. Track IDs must be copied from the annotations/evidence. "
@@ -296,6 +328,7 @@ def generate_action_plan(
     key_frame_coordinates: dict[str, list[str]],
     artifacts_dir: str | Path,
     model: str = DEFAULT_MODEL,
+    demonstration_bin_order: str = "left_to_right",
     dry_run: bool = False,
 ) -> ActionPlanningResult:
     """Generate a structured action plan from visual-prompting outputs."""
@@ -411,6 +444,7 @@ def generate_action_plan(
         place_frame=place_frame,
         track_map=normalized_track_map,
         coordinates=normalized_coordinates,
+        demonstration_bin_order=demonstration_bin_order,
     )
 
     manifest = {
@@ -420,6 +454,7 @@ def generate_action_plan(
             else "ready_for_openai"
         ),
         "model": model,
+        "demonstration_bin_order": demonstration_bin_order,
         "input_video": str(video_path),
         "input_sha256": sha256_file(video_path),
         "frame_roles": {
@@ -672,6 +707,7 @@ def run(args: argparse.Namespace) -> int:
         key_frame_coordinates=key_frame_coordinates,
         artifacts_dir=output_dir,
         model=args.model,
+        demonstration_bin_order=args.demonstration_bin_order,
         dry_run=args.dry_run,
     )
 
@@ -693,6 +729,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--demonstration-bin-order",
+        choices=[
+            "left_to_right",
+            "right_to_left",
+        ],
+        default="left_to_right",
+    )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Validate local inputs without reading the API key or calling OpenAI",
