@@ -201,38 +201,42 @@ def build_prompt(
     return (
         "Infer one pick-and-place action from the three chronologically ordered "
         "annotated frames and the tracking evidence below. The domain contains "
-        "cubes and storage bins. Use each frame only for its assigned role. Treat the "
-        "initial-scene frame as general scene context only; do not use it to decide "
-        "the picked track ID or destination. In the pick-event frame, "
-        "first identify the track ID of the cube physically grasped or manipulated by "
-        "the hand. Do not select a cube merely because of its colour or position. "
-        "After selecting the picked track ID, obtain the picked object's semantic "
-        "identity exclusively from that track ID's 'detector_label' in track_id_map. "
-        "Cube detector labels already contain the semantic colour in the exact form "
-        "'<colour> cube', for example 'red cube', 'green cube', 'blue cube', or "
-        "'yellow cube'. Do not visually infer, verify, or change the cube colour from "
-        "any video frame. The GroundingDINO detector label is the authoritative source "
-        "for the picked object's colour and category. Set picked_color to the colour "
-        "contained in that detector label and picked_category to 'cube'. In the "
-        "place-event frame, first obtain the centre of the picked cube and the centre "
-        "of every object labelled 'storage bin' from that frame's coordinates. For the "
-        "relation 'in', select the storage-bin track ID that visually receives or "
-        "contains the cube and has the smallest centre-to-centre distance from it. "
-        "When coordinates are available, compare all candidate distances and do not "
-        "select a farther bin unless the image clearly contradicts the coordinates. "
+        "coloured manipulable objects and storage bins. Use each frame only for "
+        "its assigned role. Treat the initial-scene frame as general scene context "
+        "only; do not use it to decide the picked track ID or destination. In the "
+        "pick-event frame, first identify the track ID of the object physically "
+        "grasped or manipulated by the hand. Do not select an object merely because "
+        "of its colour, type, or position. After selecting the picked track ID, "
+        "obtain the picked object's semantic identity exclusively from that "
+        "track ID's 'detector_label' in track_id_map. Manipulable object detector "
+        "labels have the exact form '<colour> <object type>', for example "
+        "'green cube', 'blue ring', or 'red cylinder'. The colour is the first "
+        "word and the object type is the remaining part of the detector label. "
+        "Never select a 'storage bin' as the picked object. Do not visually infer, "
+        "verify, or change the object's colour or type from any video frame. "
+        "The GroundingDINO detector label is the authoritative source for both "
+        "picked_color and picked_category: copy the colour and object type from it. "
+        "In the place-event frame, first obtain the centre of the picked object "
+        "and the centre of every object labelled 'storage bin' from that frame's "
+        "coordinates. For the relation 'in', select the storage-bin track ID that "
+        "visually receives or contains the picked object and has the smallest "
+        "centre-to-centre distance from it. When coordinates are available, "
+        "compare all candidate distances and do not select a farther bin unless "
+        "the image clearly contradicts the coordinates. "
         + bin_order_instruction
         + "Never infer the "
-        "destination or its ordinal from track ID, JSON order, or list order. If the "
-        "picked cube has no place-frame coordinates, or image and coordinates conflict, "
-        "report ambiguity. Track IDs must be copied from the annotations/evidence. "
-        "The relation for placing a cube inside a storage bin is 'in'. Do not infer "
-        "anything from a task or trajectory name. If evidence is insufficient, set "
-        "status to 'ambiguous' and explain why in ambiguities. The action field "
-        "must be a complete, natural-language imperative sentence that explicitly "
-        "names the picked object's visible colour and category and the destination "
-        "container's ordinal position from the left. Never use a generic label such "
-        "as 'pick-and-place'. Follow this form: 'Pick the <colour> <picked category> "
-        "and place it into the <ordinal> <destination category> from the left.' "
+        "destination or its ordinal from track ID, JSON order, or list order. If "
+        "the picked object has no place-frame coordinates, or image and coordinates "
+        "conflict, report ambiguity. Track IDs must be copied from the "
+        "annotations/evidence. The relation for placing an object inside a storage "
+        "bin is 'in'. Do not infer anything from a task or trajectory name. If "
+        "evidence is insufficient, set status to 'ambiguous' and explain why in "
+        "ambiguities. The action field must be a complete, natural-language "
+        "imperative sentence that explicitly names the picked object's labelled "
+        "colour and category and the destination container's ordinal position "
+        "from the left. Never use a generic label such as 'pick-and-place'. "
+        "Follow this form: 'Pick the <colour> <picked category> and place it into "
+        "the <ordinal> <destination category> from the left.' "
         "Return only data matching the requested JSON schema.\n\nTracking evidence:\n"
         + json.dumps(evidence, indent=2, sort_keys=True)
     )
@@ -297,17 +301,25 @@ def validate_plan(
         picked_info.get("detector_label", "")
     ).strip().lower()
 
-    if not detector_label.endswith(" cube"):
+    # The detector label is authoritative and follows
+    # "<colour> <object type>" (e.g. "green cube", "blue ring").
+    # Storage bins are destinations, never manipulable picked objects.
+    label_parts = detector_label.split(maxsplit=1)
+
+    if detector_label == "storage bin" or len(label_parts) != 2:
         raise ValueError(
-            "Picked track does not have a semantic cube detector label: "
+            "Picked track does not have a valid semantic object detector label "
+            "in '<colour> <object type>' format: "
             f"{detector_label!r}"
         )
 
-    expected_color = detector_label.removesuffix(" cube").strip()
+    expected_color, expected_category = label_parts
 
-    if step.get("picked_category", "").strip().lower() != "cube":
+    if step.get("picked_category", "").strip().lower() != expected_category:
         raise ValueError(
-            "picked_category must be 'cube' for the selected cube track"
+            "picked_category does not match the GroundingDINO detector label: "
+            f"expected={expected_category!r}, "
+            f"received={step.get('picked_category')!r}"
         )
 
     if step.get("picked_color", "").strip().lower() != expected_color:
