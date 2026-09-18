@@ -68,7 +68,19 @@ def call_openai_api(prompt_messages, client):
     return result.choices[0].message.content
 
 
-def get_object_list(video_path, client):
+def get_object_list(
+    video_path,
+    client,
+    perception_mode="generalized",
+):
+
+    perception_mode = str(perception_mode).strip().lower()
+
+    if perception_mode not in {"prior_guided", "generalized"}:
+        raise ValueError(
+            "Invalid perception_mode: "
+            f"{perception_mode!r}"
+        )
     # Use the first frame for encoding
     video = cv2.VideoCapture(video_path)
 
@@ -87,7 +99,7 @@ def get_object_list(video_path, client):
     video.release()
     print(len(base64Frames), "frames read.")
 
-    prompt_messages_state = [
+    generalized_prompt_messages = [
         {
             "role": "system",
             "content": [
@@ -177,6 +189,106 @@ def get_object_list(video_path, client):
             ],
         },
     ]
+
+    prior_guided_prompt_messages = [
+        {
+            "role": "system",
+            "content": [
+                (
+                    "You are a visual object detector whose output "
+                    "will be used directly as text queries for "
+                    "GroundingDINO."
+                ),
+                (
+                    "The scene contains colored cubes and storage bins. "
+                    "For every cube, include its visible color in the "
+                    "detector label using the exact form '<color> cube'. "
+                    "The only valid cube colors in this benchmark are: "
+                    "red, green, blue, and yellow. "
+                    "For every cube, the detector label MUST therefore "
+                    "be exactly one of: 'red cube', 'green cube', "
+                    "'blue cube', or 'yellow cube'. "
+                    "Do not use any other cube color. "
+                    "For every storage bin, always use the exact "
+                    "detector label 'storage bin' without adding color, "
+                    "position, material, or other attributes."
+                ),
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                (
+                    "Inspect the physical objects visible on the desk "
+                    "and classify them using these rules:"
+                ),
+                (
+                    "1. For every visible cube or graspable colored "
+                    "block, identify its visible color and return "
+                    "'<color> cube'."
+                ),
+                (
+                    "2. Examples of valid cube labels are 'red cube', "
+                    "'green cube', 'blue cube', and 'yellow cube'."
+                ),
+                (
+                    "3. For every bin, box, tray, container, or "
+                    "receptacle, return exactly 'storage bin'."
+                ),
+                "4. Count every physical instance separately.",
+                (
+                    "5. Repeat 'storage bin' once for every visible "
+                    "storage-bin instance."
+                ),
+                (
+                    "6. Do not include hands, grippers, people, "
+                    "the table, or background objects."
+                ),
+                (
+                    "7. Do not assign spatial descriptions such as "
+                    "'first bin from the left' or "
+                    "'second bin from the left'."
+                ),
+                "8. Do not add objects that are not visible.",
+                (
+                    "Return exactly two lines and no additional "
+                    "explanation:"
+                ),
+                "Number: <total number of instances>",
+                (
+                    "Objects: <comma-separated detector labels, "
+                    "repeated once per instance>"
+                ),
+                "Example:",
+                "Number: 6",
+                (
+                    "Objects: red cube, green cube, storage bin, "
+                    "storage bin, storage bin, storage bin"
+                ),
+                *map(
+                    lambda x: {
+                        "image": x,
+                        "resize": 768,
+                    },
+                    base64Frames[0:1],
+                ),
+            ],
+        },
+    ]
+
+    # ---------------------------------------------------------
+    # Select object-discovery prompt
+    # ---------------------------------------------------------
+
+    if perception_mode == "generalized":
+        prompt_messages_state = generalized_prompt_messages
+    else:
+        prompt_messages_state = prior_guided_prompt_messages
+
+    print(
+        "[visual_prompting] Perception mode: "
+        f"{perception_mode}"
+    )
 
     response_state = call_openai_api(
         prompt_messages_state,
@@ -574,8 +686,8 @@ def run_visual_prompting(
     bert_model=None,
     sam_checkpoint="sam_vit_h_4b8939.pth",
     sam2_checkpoint="segment-anything-2/checkpoints/sam2_hiera_large.pt",
+    perception_mode="generalized",
 ):  
-
     key_frames = ast.literal_eval(key_frames)
     artifacts_dir = os.path.abspath(artifacts_dir)
     os.makedirs(artifacts_dir, exist_ok=True)
@@ -599,7 +711,11 @@ def run_visual_prompting(
                 "OPENAI_API_KEY is required when --objects is not provided"
             )
         client = OpenAI()
-        object_list_response = get_object_list(input_video_path, client)
+        object_list_response = get_object_list(
+            input_video_path,
+            client,
+            perception_mode=perception_mode,
+        )
         num, obj_list = extract_num_object(object_list_response)
         object_discovery_source = "openai"
         print(f"Generated prompt: {obj_list}")

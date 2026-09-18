@@ -152,7 +152,15 @@ def build_prompt(
     track_map: dict[str, Any],
     coordinates: dict[str, Any],
     demonstration_bin_order: str = "left_to_right",
+    perception_mode: str = "generalized",
 ) -> str:
+
+    perception_mode = str(perception_mode).strip().lower()
+    if perception_mode not in {"generalized", "prior_guided"}:
+        raise ValueError(
+            "Invalid perception_mode: "
+            f"{perception_mode!r}"
+        )
 
     demonstration_bin_order = (
         str(demonstration_bin_order)
@@ -198,7 +206,7 @@ def build_prompt(
             str(place_frame): coordinates[str(place_frame)],
         },
     }
-    return (
+    generalized_prompt = (
         "Infer one pick-and-place action from the three chronologically ordered "
         "annotated frames and the tracking evidence below. The domain contains "
         "coloured manipulable objects and storage bins. Use each frame only for "
@@ -237,8 +245,64 @@ def build_prompt(
         "from the left. Never use a generic label such as 'pick-and-place'. "
         "Follow this form: 'Pick the <colour> <picked category> and place it into "
         "the <ordinal> <destination category> from the left.' "
-        "Return only data matching the requested JSON schema.\n\nTracking evidence:\n"
-        + json.dumps(evidence, indent=2, sort_keys=True)
+        "Return only data matching the requested JSON schema."
+    )
+
+    prior_guided_prompt = (
+        "Infer one pick-and-place action from the three chronologically ordered "
+        "annotated frames and the tracking evidence below. The domain contains "
+        "cubes and storage bins. Use each frame only for its assigned role. Treat the "
+        "initial-scene frame as general scene context only; do not use it to decide "
+        "the picked track ID or destination. In the pick-event frame, "
+        "first identify the track ID of the cube physically grasped or manipulated by "
+        "the hand. Do not select a cube merely because of its colour or position. "
+        "After selecting the picked track ID, obtain the picked object's semantic "
+        "identity exclusively from that track ID's 'detector_label' in track_id_map. "
+        "Cube detector labels already contain the semantic colour in the exact form "
+        "'<colour> cube', for example 'red cube', 'green cube', 'blue cube', or "
+        "'yellow cube'. Do not visually infer, verify, or change the cube colour from "
+        "any video frame. The GroundingDINO detector label is the authoritative source "
+        "for the picked object's colour and category. Set picked_color to the colour "
+        "contained in that detector label and picked_category to 'cube'. In the "
+        "place-event frame, first obtain the centre of the picked cube and the centre "
+        "of every object labelled 'storage bin' from that frame's coordinates. For the "
+        "relation 'in', select the storage-bin track ID that visually receives or "
+        "contains the cube and has the smallest centre-to-centre distance from it. "
+        "When coordinates are available, compare all candidate distances and do not "
+        "select a farther bin unless the image clearly contradicts the coordinates. "
+        + bin_order_instruction
+        + "Never infer the destination or its ordinal from track ID, JSON order, "
+        "or list order. If the picked cube has no place-frame coordinates, or image "
+        "and coordinates conflict, report ambiguity. Track IDs must be copied from "
+        "the annotations/evidence. The relation for placing a cube inside a storage "
+        "bin is 'in'. Do not infer anything from a task or trajectory name. If "
+        "evidence is insufficient, set status to 'ambiguous' and explain why in "
+        "ambiguities. The action field must be a complete, natural-language "
+        "imperative sentence that explicitly names the picked object's labelled "
+        "colour and category and the destination container's ordinal position "
+        "from the left. Never use a generic label such as 'pick-and-place'. "
+        "Follow this form: 'Pick the <colour> <picked category> and place it into "
+        "the <ordinal> <destination category> from the left.' "
+        "Return only data matching the requested JSON schema."
+    )
+
+    # ---------------------------------------------------------
+    # Select action-planning prompt
+    # ---------------------------------------------------------
+
+    if perception_mode == "generalized":
+        prompt = generalized_prompt
+    else:
+        prompt = prior_guided_prompt
+
+    return (
+        prompt
+        + "\n\nTracking evidence:\n"
+        + json.dumps(
+            evidence,
+            indent=2,
+            sort_keys=True,
+        )
     )
 
 
@@ -342,11 +406,14 @@ def generate_action_plan(
     model: str = DEFAULT_MODEL,
     demonstration_bin_order: str = "left_to_right",
     dry_run: bool = False,
+    perception_mode: str = "generalized",
 ) -> ActionPlanningResult:
     """Generate a structured action plan from visual-prompting outputs."""
 
     video_path = Path(annotated_video_path).expanduser().resolve()
     output_dir = Path(artifacts_dir).expanduser().resolve()
+
+    perception_mode = str(perception_mode).strip().lower()
 
     if not video_path.is_file():
         raise FileNotFoundError(
@@ -457,6 +524,7 @@ def generate_action_plan(
         track_map=normalized_track_map,
         coordinates=normalized_coordinates,
         demonstration_bin_order=demonstration_bin_order,
+        perception_mode=perception_mode,
     )
 
     manifest = {
@@ -466,6 +534,7 @@ def generate_action_plan(
             else "ready_for_openai"
         ),
         "model": model,
+        "perception_mode": perception_mode,
         "demonstration_bin_order": demonstration_bin_order,
         "input_video": str(video_path),
         "input_sha256": sha256_file(video_path),
