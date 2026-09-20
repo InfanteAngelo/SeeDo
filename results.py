@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +116,14 @@ class SceneObject:
     # Object 3D position transformed into the robot base frame.
     position_base: tuple[float, float, float]
 
+    # Optional semantic category assigned to the object.
+    category: str | None = None
+
+    # Optional attribute assigned to the object.
+    attributes: dict[str, Any] = field(
+        default_factory=dict
+    )
+
 
 @dataclass(frozen=True)
 class SceneState:
@@ -169,6 +177,14 @@ class DetectedObject:
     # Optional detector confidence score.
     confidence: float | None = None
 
+    # Optional semantic category assigned to the object.
+    category: str | None = None
+
+    # Optional attribute assigned to the object.
+    attributes: dict[str, Any] = field(
+        default_factory=dict
+    )
+
 
 @dataclass(frozen=True)
 class ScenePerceptionResult:
@@ -213,6 +229,14 @@ class RawSceneObject:
 
     # Optional detector confidence score.
     confidence: float | None = None
+
+    # Optional semantic category assigned to the object.
+    category: str | None = None
+
+    # Optional attribute assigned to the object.
+    attributes: dict[str, Any] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)

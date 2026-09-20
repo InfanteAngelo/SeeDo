@@ -194,6 +194,13 @@ def build_prompt(
             "Invalid demonstration_bin_order: "
             f"{demonstration_bin_order!r}"
         )
+
+    generalized_order_direction = (
+        "ascending"
+        if demonstration_bin_order == "left_to_right"
+        else "descending"
+    )
+    
     evidence = {
         "frame_roles": {
             "0": "initial scene",
@@ -207,44 +214,132 @@ def build_prompt(
         },
     }
     generalized_prompt = (
-        "Infer one pick-and-place action from the three chronologically ordered "
-        "annotated frames and the tracking evidence below. The domain contains "
-        "coloured manipulable objects and storage bins. Use each frame only for "
-        "its assigned role. Treat the initial-scene frame as general scene context "
-        "only; do not use it to decide the picked track ID or destination. In the "
-        "pick-event frame, first identify the track ID of the object physically "
-        "grasped or manipulated by the hand. Do not select an object merely because "
-        "of its colour, type, or position. After selecting the picked track ID, "
-        "obtain the picked object's semantic identity exclusively from that "
-        "track ID's 'detector_label' in track_id_map. Manipulable object detector "
-        "labels have the exact form '<colour> <object type>', for example "
-        "'green cube', 'blue ring', or 'red cylinder'. The colour is the first "
-        "word and the object type is the remaining part of the detector label. "
-        "Never select a 'storage bin' as the picked object. Do not visually infer, "
-        "verify, or change the object's colour or type from any video frame. "
-        "The GroundingDINO detector label is the authoritative source for both "
-        "picked_color and picked_category: copy the colour and object type from it. "
-        "In the place-event frame, first obtain the centre of the picked object "
-        "and the centre of every object labelled 'storage bin' from that frame's "
-        "coordinates. For the relation 'in', select the storage-bin track ID that "
-        "visually receives or contains the picked object and has the smallest "
-        "centre-to-centre distance from it. When coordinates are available, "
-        "compare all candidate distances and do not select a farther bin unless "
-        "the image clearly contradicts the coordinates. "
-        + bin_order_instruction
-        + "Never infer the "
-        "destination or its ordinal from track ID, JSON order, or list order. If "
-        "the picked object has no place-frame coordinates, or image and coordinates "
-        "conflict, report ambiguity. Track IDs must be copied from the "
-        "annotations/evidence. The relation for placing an object inside a storage "
-        "bin is 'in'. Do not infer anything from a task or trajectory name. If "
-        "evidence is insufficient, set status to 'ambiguous' and explain why in "
-        "ambiguities. The action field must be a complete, natural-language "
-        "imperative sentence that explicitly names the picked object's labelled "
-        "colour and category and the destination container's ordinal position "
-        "from the left. Never use a generic label such as 'pick-and-place'. "
-        "Follow this form: 'Pick the <colour> <picked category> and place it into "
-        "the <ordinal> <destination category> from the left.' "
+        "Infer one pick-and-place action from the three chronologically "
+        "ordered annotated frames and the tracking evidence below. "
+        "Use each frame only for its assigned role. "
+        "The initial frame provides scene context only. "
+
+        "OBJECT METADATA: "
+        "The track_id_map contains authoritative object-discovery metadata. "
+        "Each track has a detector_label, a semantic category and an "
+        "attributes dictionary. "
+        "Use these structured fields directly. "
+        "Never derive the category or attributes by splitting the "
+        "detector_label into words. "
+        "Do not infer, verify, correct or replace object metadata "
+        "using the visual appearance. "
+        "Track IDs are local to this demonstration. "
+
+        "PICK OBJECT: "
+        "In the pick-event frame, identify the track ID of the object "
+        "physically grasped or manipulated by the hand. "
+        "Do not select an object merely because of its color, "
+        "category or position. "
+        "Set picked_track_id to the selected track ID. "
+        "Set picked_category to the exact category stored in "
+        "track_id_map for that track. "
+        "Set picked_color to the value of attributes['color'] "
+        "when that attribute exists. "
+        "If the selected object has no color attribute, "
+        "set picked_color to an empty string. "
+        "Never interpret a material or another attribute as a color. "
+
+        "DESTINATION: "
+        "In the place-event frame, identify the tracked object that "
+        "acts as the destination or reference for the placement. "
+        "The destination may belong to ANY detected category. "
+        "Do not assume that it is a container or that any "
+        "particular category has a fixed manipulation role. "
+        "Select destination_track_id using the observed interaction, "
+        "the object tracks and the available coordinates. "
+        "Do not select a destination merely because it is closest. "
+        "If the destination cannot be identified reliably, "
+        "report ambiguity. "
+
+        "DESTINATION IDENTITY: "
+        "After selecting destination_track_id, obtain its category "
+        "directly from track_id_map. "
+        "Set destination_category to that exact category, "
+        "NOT to the detector_label. "
+
+        "DESTINATION ORDINAL: "
+        "Consider ALL tracks whose category is exactly equal to "
+        "the selected destination's category, regardless of their "
+        "detector_label or attributes. "
+        "Use the place-frame x coordinates of these tracks. "
+        "Sort them in "
+        f"{generalized_order_direction} order. "
+        "Set destination_ordinal_from_left to the selected "
+        "destination's one-based position in this sorted list. "
+        "If it is the only object in its category, use ordinal 1. "
+        "Never derive an ordinal from track IDs, JSON order, "
+        "detection order or object naming. "
+        "If required coordinates are missing or the ordering "
+        "cannot be established reliably, report ambiguity. "
+
+        "RELATION: "
+        "Infer the spatial or functional placement relation "
+        "from the observed interaction. "
+        "Do not assume that the relation is 'in'. "
+        "Use a concise relation supported by the video. "
+        "Do not invent an unsupported relation. "
+
+        "ACTION DESCRIPTION: "
+        "Generate one complete natural-language imperative describing "
+        "both the picking and the placement. "
+        "The sentence MUST begin with 'Pick the' and continue "
+        "with 'and place it'. "
+        "Use the exact detector_label of the picked track and the "
+        "exact detector_label of the destination track. "
+
+        "The destination description MUST be constructed from "
+        "destination_category and destination_ordinal_from_left. "
+        "Count all tracks belonging to the same destination category. "
+
+        "If multiple tracks belong to that category, ALWAYS include "
+        "the ordinal position in the action sentence, even if the "
+        "destination appears visually obvious or uniquely identifiable "
+        "from the interaction. "
+        "Convert destination_ordinal_from_left into an English ordinal "
+        "word such as 'first', 'second', 'third', or 'fourth'. "
+        "Place the ordinal BEFORE the exact destination detector_label "
+        "and append 'from the left'. "
+        "Never omit the ordinal when multiple objects share the category. "
+        "Never replace the ordinal with a numeric index or a generic "
+        "destination description. "
+
+        "For multiple destinations, follow this exact template: "
+        "'Pick the <picked detector_label> and place it <relation> "
+        "the <ordinal word> <destination detector_label> from the left.' "
+
+        "For example, when picked detector_label is 'green cube', "
+        "destination detector_label is 'wooden box', "
+        "destination_ordinal_from_left is 1, and relation is 'in', "
+        "the action MUST be: "
+        "'Pick the green cube and place it in the first wooden box "
+        "from the left.' "
+        "The sentence 'Pick the green cube and place it in the wooden box.' "
+        "is INVALID when multiple objects belong to the box category. "
+
+        "If the destination is the only object in its category, "
+        "use its exact detector_label without an ordinal. "
+        "Follow this template: "
+        "'Pick the <picked detector_label> and place it <relation> "
+        "the <destination detector_label>.' "
+
+        "Use the placement relation inferred from the video. "
+        "Do not assume that the relation is always 'in' or 'on'. "
+        "Ensure that the action sentence is consistent with "
+        "picked_track_id, destination_track_id, destination_category, "
+        "destination_ordinal_from_left and relation. "
+        "Do not replace object categories with unsupported synonyms. "
+
+        "GENERAL RULES: "
+        "Track IDs must come exclusively from the supplied tracking evidence. "
+        "Never infer information from task or trajectory names. "
+        "If evidence is insufficient, metadata is missing or observations "
+        "are contradictory, set status to 'ambiguous' and explain "
+        "the problem in ambiguities. "
         "Return only data matching the requested JSON schema."
     )
 
@@ -338,6 +433,9 @@ def validate_plan(
     pick_frame: int,
     place_frame: int,
     track_map: dict[str, Any],
+    coordinates: dict[str, dict[str, list[int]]],
+    demonstration_bin_order: str,
+    perception_mode: str,
 ) -> None:
     steps = plan.get("steps")
     if not isinstance(steps, list):
@@ -358,6 +456,208 @@ def validate_plan(
         if step.get(field) not in known_ids:
             raise ValueError(f"Unknown {field}: {step.get(field)}")
 
+    # ---------------------------------------------------------
+    # Generalized validation
+    # ---------------------------------------------------------
+
+    if perception_mode == "generalized":
+
+        picked_track_id = str(
+            step["picked_track_id"]
+        )
+
+        destination_track_id = str(
+            step["destination_track_id"]
+        )
+
+        picked_info = track_map[
+            picked_track_id
+        ]
+
+        destination_info = track_map[
+            destination_track_id
+        ]
+
+        # -----------------------------------------------------
+        # Picked object: authoritative structured metadata
+        # -----------------------------------------------------
+
+        expected_category = str(
+            picked_info.get("category", "")
+        ).strip().lower()
+
+        if not expected_category:
+            raise ValueError(
+                "Picked track has no category metadata."
+            )
+
+        attributes = picked_info.get(
+            "attributes"
+        )
+
+        if not isinstance(attributes, dict):
+            raise ValueError(
+                "Picked track has invalid attributes metadata."
+            )
+
+        expected_color = attributes.get(
+            "color",
+            "",
+        )
+
+        if not isinstance(expected_color, str):
+            raise ValueError(
+                "Picked track has an invalid color attribute."
+            )
+
+        expected_color = expected_color.strip().lower()
+
+        if (
+            step["picked_category"].strip().lower()
+            != expected_category
+        ):
+            raise ValueError(
+                "Picked category mismatch: "
+                f"expected={expected_category!r}, "
+                f"received={step['picked_category']!r}"
+            )
+
+        if (
+            step["picked_color"].strip().lower()
+            != expected_color
+        ):
+            raise ValueError(
+                "Picked color mismatch: "
+                f"expected={expected_color!r}, "
+                f"received={step['picked_color']!r}"
+            )
+
+        # -----------------------------------------------------
+        # Destination: authoritative category
+        # -----------------------------------------------------
+
+        destination_category = str(
+            destination_info.get("category", "")
+        ).strip().lower()
+
+        if not destination_category:
+            raise ValueError(
+                "Destination track has no category metadata."
+            )
+
+        if (
+            step["destination_category"].strip().lower()
+            != destination_category
+        ):
+            raise ValueError(
+                "Destination category mismatch: "
+                f"expected={destination_category!r}, "
+                f"received={step['destination_category']!r}"
+            )
+
+        # -----------------------------------------------------
+        # Destination ordinal: deterministic spatial validation
+        # -----------------------------------------------------
+
+        if demonstration_bin_order not in {
+            "left_to_right",
+            "right_to_left",
+        }:
+            raise ValueError(
+                "Invalid demonstration_bin_order: "
+                f"{demonstration_bin_order!r}"
+            )
+
+        place_coordinates = coordinates.get(
+            str(place_frame)
+        )
+
+        if place_coordinates is None:
+            raise ValueError(
+                "Missing place-frame coordinates."
+            )
+
+        # Include every track belonging to the same category,
+        # independently of detector_label and attributes.
+        category_track_ids = [
+            track_id
+            for track_id, info in track_map.items()
+            if str(
+                info.get("category", "")
+            ).strip().lower() == destination_category
+        ]
+
+        if destination_track_id not in category_track_ids:
+            raise ValueError(
+                "Destination track is missing from its category."
+            )
+
+        missing_coordinates = [
+            track_id
+            for track_id in category_track_ids
+            if track_id not in place_coordinates
+        ]
+
+        if missing_coordinates:
+            raise ValueError(
+                "Missing place-frame coordinates for "
+                f"destination-category tracks: {missing_coordinates}"
+            )
+
+        # Identical x coordinates make a strict left/right
+        # ordinal ambiguous.
+        x_coordinates = [
+            place_coordinates[track_id][0]
+            for track_id in category_track_ids
+        ]
+
+        if len(x_coordinates) != len(set(x_coordinates)):
+            raise ValueError(
+                "Destination-category ordering is ambiguous: "
+                "two or more tracks have identical x coordinates."
+            )
+
+        reverse_order = (
+            demonstration_bin_order == "right_to_left"
+        )
+
+        ordered_track_ids = sorted(
+            category_track_ids,
+            key=lambda track_id: (
+                place_coordinates[track_id][0]
+            ),
+            reverse=reverse_order,
+        )
+
+        expected_ordinal = (
+            ordered_track_ids.index(
+                destination_track_id
+            ) + 1
+        )
+
+        if (
+            step["destination_ordinal_from_left"]
+            != expected_ordinal
+        ):
+            raise ValueError(
+                "Destination ordinal mismatch: "
+                f"expected={expected_ordinal}, "
+                f"received="
+                f"{step['destination_ordinal_from_left']}, "
+                f"ordered_tracks={ordered_track_ids}"
+            )
+
+        return
+
+    # ---------------------------------------------------------
+    # Prior-guided validation: original implementation
+    # ---------------------------------------------------------
+
+    if perception_mode != "prior_guided":
+        raise ValueError(
+            f"Invalid perception_mode: {perception_mode!r}"
+        )
+
     picked_track_id = str(step["picked_track_id"])
     picked_info = track_map[picked_track_id]
 
@@ -365,15 +665,12 @@ def validate_plan(
         picked_info.get("detector_label", "")
     ).strip().lower()
 
-    # The detector label is authoritative and follows
-    # "<colour> <object type>" (e.g. "green cube", "blue ring").
-    # Storage bins are destinations, never manipulable picked objects.
     label_parts = detector_label.split(maxsplit=1)
 
     if detector_label == "storage bin" or len(label_parts) != 2:
         raise ValueError(
-            "Picked track does not have a valid semantic object detector label "
-            "in '<colour> <object type>' format: "
+            "Picked track does not have a valid semantic object "
+            "detector label in '<colour> <object type>' format: "
             f"{detector_label!r}"
         )
 
@@ -381,14 +678,16 @@ def validate_plan(
 
     if step.get("picked_category", "").strip().lower() != expected_category:
         raise ValueError(
-            "picked_category does not match the GroundingDINO detector label: "
+            "picked_category does not match the GroundingDINO "
+            "detector label: "
             f"expected={expected_category!r}, "
             f"received={step.get('picked_category')!r}"
         )
 
     if step.get("picked_color", "").strip().lower() != expected_color:
         raise ValueError(
-            "picked_color does not match the GroundingDINO detector label: "
+            "picked_color does not match the GroundingDINO "
+            "detector label: "
             f"expected={expected_color!r}, "
             f"received={step.get('picked_color')!r}"
         )
@@ -629,6 +928,9 @@ def generate_action_plan(
             pick_frame=pick_frame,
             place_frame=place_frame,
             track_map=normalized_track_map,
+            coordinates=normalized_coordinates,
+            demonstration_bin_order=demonstration_bin_order,
+            perception_mode=perception_mode,
         )
 
     except Exception as error:
