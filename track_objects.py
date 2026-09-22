@@ -92,6 +92,21 @@ GENERALIZED_DISCOVERY_USER_PROMPT = (
     "Do not derive the category mechanically "
     "from the detector label. "
 
+    "For every bin, box, tray, container, or "
+    "receptacle, always return exactly "
+    "category='bin' and detector_label='storage bin'. "
+
+    "Count each distinct placement compartment "
+    "as one storage bin, even when multiple "
+    "compartments belong to a shared structure. "
+
+    "Do not count the entire shared structure "
+    "as an additional object when its individual "
+    "compartments have already been counted. "
+
+    "Do not add material, color, size or spatial "
+    "descriptions to the storage bin detector label. "
+
     "Do not include spatial ordinals or "
     "instance identifiers in detector labels. "
 
@@ -325,6 +340,33 @@ def parse_structured_object_list(response_state):
         attributes = record["attributes"]
         count = record["count"]
 
+        container_categories = {
+            "bin",
+            "box",
+            "tray",
+            "container",
+            "receptacle",
+            "storage bin",
+        }
+
+        container_pattern = (
+            r"\b(?:bin|bins|box|boxes|tray|trays|"
+            r"container|containers|receptacle|receptacles)\b"
+        )
+
+        is_container = (
+            category in container_categories
+            or re.search(
+                container_pattern,
+                detector_label,
+            ) is not None
+        )
+
+        if is_container:
+            category = "bin"
+            detector_label = "storage bin"
+            attributes = {}
+
         if not category or not detector_label:
             raise ValueError(
                 "Category and detector label cannot be empty."
@@ -344,15 +386,19 @@ def parse_structured_object_list(response_state):
             )
 
         if detector_label in metadata_by_label:
-            raise ValueError(
-                "Duplicate detector-label record: "
-                f"{detector_label}"
-            )
 
-        metadata_by_label[detector_label] = {
-            "category": category,
-            "attributes": attributes,
-        }
+            if detector_label != "storage bin":
+                raise ValueError(
+                    "Duplicate detector-label record: "
+                    f"{detector_label}"
+                )
+
+        else:
+
+            metadata_by_label[detector_label] = {
+                "category": category,
+                "attributes": attributes,
+            }
 
         object_list.extend(
             [detector_label] * count
@@ -622,7 +668,7 @@ def detect_generalized_objects(
                     logits=logits,
                     phrases=phrases,
                     detector_label=label,
-                    apply=category in {"bin", "box"},
+                    apply=category in {"bin", "box", "container", "tray"},
                 )
             )
 
@@ -778,6 +824,7 @@ def detect_generalized_objects(
         queries = [
             f"dark {label}",
             f"light {label}",
+            label.split()[-1],
             category,
         ]
 
