@@ -53,9 +53,10 @@ PLAN_SCHEMA: dict[str, Any] = {
                         "destination_ordinal_from_left": {"type": "integer"},
                         "relation": {"type": "string"},
                         "action": {"type": "string"},
+                        "picked_detector_label": {"type": "string",},
                     },
                     "required": [
-                        "pick_keyframe", "place_keyframe", "picked_track_id",
+                        "pick_keyframe", "place_keyframe", "picked_track_id", "picked_detector_label",
                         "picked_category", "picked_color", "destination_track_id",
                         "destination_category", "destination_ordinal_from_left",
                         "relation", "action",
@@ -219,13 +220,15 @@ def build_prompt(
         "Use each frame only for its assigned role. "
         "The initial frame provides scene context only. "
 
+        
         "OBJECT METADATA: "
         "The track_id_map contains authoritative object-discovery metadata. "
         "Each track has a detector_label, a semantic category and an "
         "attributes dictionary. "
-        "Use these structured fields directly. "
-        "Never derive the category or attributes by splitting the "
-        "detector_label into words. "
+        "Use detector_label and category as authoritative semantic metadata. "
+        "The attributes dictionary is retained for backward compatibility only. "
+        "Do not use attributes to identify the picked object. "
+        "Never derive the category by splitting the detector_label into words. "
         "Do not infer, verify, correct or replace object metadata "
         "using the visual appearance. "
         "Track IDs are local to this demonstration. "
@@ -238,11 +241,13 @@ def build_prompt(
         "Set picked_track_id to the selected track ID. "
         "Set picked_category to the exact category stored in "
         "track_id_map for that track. "
-        "Set picked_color to the value of attributes['color'] "
-        "when that attribute exists. "
-        "If the selected object has no color attribute, "
-        "set picked_color to an empty string. "
-        "Never interpret a material or another attribute as a color. "
+        "Set picked_detector_label to the exact detector_label "
+        "stored in track_id_map for the selected picked track. "
+        "Do not infer or modify picked_detector_label "
+        "from the visual appearance. "
+        "Set picked_color to an empty string. "
+        "The picked_color field is retained only for backward compatibility "
+        "and must not be used to identify the picked object. "
 
         "DESTINATION: "
         "In the place-event frame, identify the tracked object that "
@@ -353,6 +358,8 @@ def build_prompt(
         "the hand. Do not select a cube merely because of its colour or position. "
         "After selecting the picked track ID, obtain the picked object's semantic "
         "identity exclusively from that track ID's 'detector_label' in track_id_map. "
+        "Set picked_detector_label to the exact detector_label "
+        "stored in track_id_map for the selected picked track. "
         "Cube detector labels already contain the semantic colour in the exact form "
         "'<colour> cube', for example 'red cube', 'green cube', 'blue cube', or "
         "'yellow cube'. Do not visually infer, verify, or change the cube colour from "
@@ -456,6 +463,32 @@ def validate_plan(
         if step.get(field) not in known_ids:
             raise ValueError(f"Unknown {field}: {step.get(field)}")
 
+    # Validate the picked detector label against
+    # the selected demonstration track.
+
+    picked_info = track_map[
+        str(step["picked_track_id"])
+    ]
+
+    expected_label = str(
+        picked_info.get("detector_label", "")
+    ).strip()
+
+    received_label = str(
+        step.get("picked_detector_label", "")
+    ).strip()
+
+    if (
+        not expected_label
+        or received_label.casefold()
+        != expected_label.casefold()
+    ):
+        raise ValueError(
+            "Picked detector label mismatch: "
+            f"expected={expected_label!r}, "
+            f"received={received_label!r}"
+        )
+
     # ---------------------------------------------------------
     # Generalized validation
     # ---------------------------------------------------------
@@ -491,27 +524,6 @@ def validate_plan(
                 "Picked track has no category metadata."
             )
 
-        attributes = picked_info.get(
-            "attributes"
-        )
-
-        if not isinstance(attributes, dict):
-            raise ValueError(
-                "Picked track has invalid attributes metadata."
-            )
-
-        expected_color = attributes.get(
-            "color",
-            "",
-        )
-
-        if not isinstance(expected_color, str):
-            raise ValueError(
-                "Picked track has an invalid color attribute."
-            )
-
-        expected_color = expected_color.strip().lower()
-
         if (
             step["picked_category"].strip().lower()
             != expected_category
@@ -520,16 +532,6 @@ def validate_plan(
                 "Picked category mismatch: "
                 f"expected={expected_category!r}, "
                 f"received={step['picked_category']!r}"
-            )
-
-        if (
-            step["picked_color"].strip().lower()
-            != expected_color
-        ):
-            raise ValueError(
-                "Picked color mismatch: "
-                f"expected={expected_color!r}, "
-                f"received={step['picked_color']!r}"
             )
 
         # -----------------------------------------------------
@@ -985,6 +987,9 @@ def generate_action_plan(
             ),
             relation=str(step["relation"]),
             action=str(step["action"]),
+            picked_detector_label=str(
+                step["picked_detector_label"]
+            ),
         )
         for step in plan["steps"]
     )

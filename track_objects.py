@@ -100,12 +100,21 @@ GENERALIZED_DISCOVERY_USER_PROMPT = (
     "as one storage bin, even when multiple "
     "compartments belong to a shared structure. "
 
-    "Do not count the entire shared structure "
-    "as an additional object when its individual "
-    "compartments have already been counted. "
+    "For every manipulable object that is not a "
+    "storage bin, include its visible color and "
+    "object type in detector_label using the form "
+    "'<color> <object type>' whenever the color "
+    "is visually identifiable. "
 
-    "Do not add material, color, size or spatial "
-    "descriptions to the storage bin detector label. "
+    "Use a simple, specific, singular English noun "
+    "for the actual object type. "
+
+    "Examples include 'red block', 'blue ring', "
+    "'wooden peg', and 'yellow cube'. "
+
+    "Do not replace a clearly identifiable object "
+    "type with a generic term such as 'tool' "
+    "or 'object'. "
 
     "Do not include spatial ordinals or "
     "instance identifiers in detector labels. "

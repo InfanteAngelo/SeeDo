@@ -79,6 +79,10 @@ class ActionStep:
     # Natural-language description of the manipulation action.
     action: str
 
+    # Exact detector label of the picked object.
+    # Empty only for legacy action plans.
+    picked_detector_label: str = ""
+
 
 @dataclass(frozen=True)
 class ActionPlanningResult:
