@@ -1480,7 +1480,62 @@ def run_visual_prompting(
 
     object_counts = Counter(obj_list)
 
-    image_source, image = load_image_from_array(frames[0])
+    # image_source, image = load_image_from_array(frames[0])
+
+    # Keep the complete frame for SAM, SAM2 and all downstream
+    # processing.
+    image_source = frames[0]
+
+    # Crop only the upper part of the image seen by GroundingDINO.
+    dino_crop_top = 80
+
+    if (
+        dino_crop_top < 0
+        or dino_crop_top >= image_source.shape[0]
+    ):
+        raise ValueError(
+            "Invalid GroundingDINO crop: "
+            f"crop_top={dino_crop_top}, "
+            f"image_height={image_source.shape[0]}"
+        )
+
+    dino_image_source = image_source[
+        dino_crop_top:,
+        :
+    ]
+
+    dino_input_path = (
+        Path(artifacts_dir)
+        / "groundingdino_input.png"
+    )
+
+    cv2.imwrite(
+        str(dino_input_path),
+        cv2.cvtColor(
+            dino_image_source,
+            cv2.COLOR_RGB2BGR,
+        ),
+    )
+
+    print(
+        "[visual_prompting] GroundingDINO input saved to: "
+        f"{dino_input_path}"
+    )
+
+    # GroundingDINO sees only the cropped image.
+    # The returned image source is intentionally ignored.
+    _, image = load_image_from_array(
+        dino_image_source
+    )
+
+    print(
+        "[visual_prompting] GroundingDINO crop: "
+        f"top={dino_crop_top}px | "
+        f"full={image_source.shape[1]}x"
+        f"{image_source.shape[0]} | "
+        f"dino={dino_image_source.shape[1]}x"
+        f"{dino_image_source.shape[0]}"
+    )
 
     best_boxes = []
     best_phrases = []
@@ -2249,6 +2304,28 @@ def run_visual_prompting(
         )
     best_boxes = torch.cat(best_boxes)
     best_logits = torch.stack(best_logits)
+
+    # GroundingDINO boxes are normalized with respect to the
+    # cropped image. Convert them back to normalized coordinates
+    # of the complete frame before SAM and SAM2 use them.
+
+    full_height = image_source.shape[0]
+    crop_height = dino_image_source.shape[0]
+
+    best_boxes = best_boxes.clone()
+
+    # cy: crop-normalized -> full-frame normalized
+    best_boxes[:, 1] = (
+        best_boxes[:, 1] * crop_height
+        + dino_crop_top
+    ) / full_height
+
+    # h: crop-normalized -> full-frame normalized
+    best_boxes[:, 3] = (
+        best_boxes[:, 3]
+        * crop_height
+        / full_height
+    )
 
     annotated_frame = my_annotate(
         image_source=image_source,
