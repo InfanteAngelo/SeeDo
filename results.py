@@ -6,6 +6,10 @@ from typing import Any
 
 import numpy as np
 
+from ai_controller.models.seedo_controller.task_types import (
+    TaskType,
+)
+
 
 @dataclass(frozen=True)
 class FrameExtractorResult:
@@ -99,6 +103,11 @@ class ActionPlanningResult:
 
     # Human-readable description of the complete inferred task.
     natural_language_plan: str
+
+    # Manipulation task inferred from the demonstration.
+    # Supported values are "pick_and_place" and "nut_assembly".
+    # "unknown" is used when the task cannot be classified reliably.
+    task_type: TaskType | None = None
 
 
 @dataclass(frozen=True)

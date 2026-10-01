@@ -19,6 +19,13 @@ import cv2
 
 from results import ActionPlanningResult, ActionStep
 
+from ai_controller.models.seedo_controller.task_types import (
+    TaskType,
+    UNKNOWN_TASK_TYPE,
+    supported_task_values,
+    all_task_values,
+)
+
 DEFAULT_MODEL = "gpt-4o-2024-08-06"
 KEYFRAME_RE = re.compile(r"The selected valley frames are:\s*\[([^\]]*)\]")
 TRACK_MAP_RE = re.compile(r"^TRACK_ID_MAP:\s*(\{.*\})\s*$", re.MULTILINE)
@@ -65,9 +72,13 @@ PLAN_SCHEMA: dict[str, Any] = {
                 },
             },
             "status": {"type": "string", "enum": ["completed", "ambiguous"]},
+            "task_type": {
+                "type": "string",
+                "enum": list(all_task_values()),
+            },
             "ambiguities": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["steps", "status", "ambiguities"],
+        "required": ["steps", "status", "ambiguities", "task_type"],
         "additionalProperties": False,
     },
 }
@@ -215,12 +226,39 @@ def build_prompt(
         },
     }
     generalized_prompt = (
-        "Infer one pick-and-place action from the three chronologically "
-        "ordered annotated frames and the tracking evidence below. "
+        "Infer one demonstrated manipulation action from the three "
+        "chronologically ordered annotated frames and the tracking "
+        "evidence below. "
         "Use each frame only for its assigned role. "
         "The initial frame provides scene context only. "
 
-        
+        "TASK CLASSIFICATION: "
+        "The robot supports exactly the following manipulation tasks: "
+
+        "1. 'pick_and_place': an object is picked, transported to a "
+        "destination such as a container, support, or placement region, "
+        "and released there. The purpose of the action is object relocation. "
+
+        "2. 'nut_assembly': an object is picked, transported to a "
+        "peg-like assembly destination, and positioned onto or around "
+        "that destination as part of an assembly operation. "
+        "The purpose of the action is assembly with the destination, "
+        "rather than simple relocation. "
+
+        "Classify the demonstrated action by observing the interaction "
+        "across the supplied frames. "
+        "Use object metadata as supporting evidence, but do NOT classify "
+        "the task solely from the presence or name of an object. "
+        "In particular, do not select 'nut_assembly' merely because a "
+        "peg is visible and do not select 'pick_and_place' merely because "
+        "a bin or container is visible. "
+
+        "Set task_type to exactly 'pick_and_place' or 'nut_assembly' "
+        "when the demonstrated task can be identified reliably. "
+        "If the visual and tracking evidence is insufficient to distinguish "
+        "the supported tasks, set task_type to 'unknown', set status to "
+        "'ambiguous', and explain the reason in ambiguities. "
+
         "OBJECT METADATA: "
         "The track_id_map contains authoritative object-discovery metadata. "
         "Each track has a detector_label, a semantic category and an "
@@ -447,6 +485,35 @@ def validate_plan(
     steps = plan.get("steps")
     if not isinstance(steps, list):
         raise ValueError("The plan steps must be a list")
+
+    task_type = str(
+        plan.get(
+            "task_type",
+            "",
+        )
+    ).strip().lower()
+
+    supported_task_types = set(
+        supported_task_values()
+    )
+
+    if plan.get("status") == "completed":
+        if task_type not in supported_task_types:
+            raise ValueError(
+                "A completed plan must contain a supported "
+                f"task_type, received {task_type!r}."
+            )
+
+    elif plan.get("status") == "ambiguous":
+        if task_type not in (
+            supported_task_types
+            | {UNKNOWN_TASK_TYPE}
+        ):
+            raise ValueError(
+                "Invalid task_type for an ambiguous plan: "
+                f"{task_type!r}."
+            )
+    
     if plan.get("status") == "ambiguous" and not steps:
         if not plan.get("ambiguities"):
             raise ValueError("An ambiguous plan must explain its ambiguities")
@@ -877,6 +944,7 @@ def generate_action_plan(
             natural_language_plan=(
                 "No action plan generated during dry run."
             ),
+            task_type="unknown",
         )
 
     if not os.environ.get("OPENAI_API_KEY"):
@@ -1017,6 +1085,12 @@ def generate_action_plan(
             for item in plan["ambiguities"]
         ),
         natural_language_plan=natural_language_plan,
+        task_type=str(plan["task_type"]),
+    )
+
+    print(
+        "Classified demonstration task: "
+        f"{result.task_type}"
     )
 
     print(
