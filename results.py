@@ -74,7 +74,7 @@ class ActionStep:
 
     # Left-to-right ordinal position of the destination among objects
     # belonging to the same category.
-    destination_ordinal_from_left: int
+    destination_ordinal_from_left: int | None
 
     # Spatial or semantic relation connecting the picked object and
     # destination.
@@ -109,6 +109,111 @@ class ActionPlanningResult:
     # "unknown" is used when the task cannot be classified reliably.
     task_type: TaskType | None = None
 
+@dataclass(frozen=True)
+class StructuredSceneObject:
+    """Object used to represent the spatial structure of a scene."""
+
+    # Identifier of the source object.
+    # Demonstration track IDs are converted to strings so that the same
+    # representation can also be used for runtime object identifiers.
+    object_id: str
+
+    # Semantic category of the object.
+    category: str
+
+    # SAM-mask centroid expressed in image pixel coordinates.
+    center: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class StructuredSceneRelation:
+    """Directed qualitative spatial relation between two scene objects."""
+
+    # Object whose position is being described.
+    subject_object_id: str
+
+    # Object used as spatial reference.
+    reference_object_id: str
+
+    # Qualitative relation of the subject relative to the reference.
+    # Examples: LEFT, RIGHT, UP, DOWN, UP_LEFT, ...
+    relation: str
+
+
+@dataclass(frozen=True)
+class StructuredScene:
+    """Canonical structural representation of a scene."""
+
+    # Objects participating in the structural representation.
+    objects: tuple[StructuredSceneObject, ...]
+
+    # Directed spatial relations between scene objects.
+    relations: tuple[StructuredSceneRelation, ...]
+
+    # Number of angular directions used to quantize spatial relations.
+    # Supported values are 4 and 8.
+    directions: int
+
+@dataclass(frozen=True)
+class StructuralObjectMatch:
+    """Association between one demonstration object and one runtime object."""
+
+    demo_object_id: str
+    runtime_object_id: str
+
+
+@dataclass(frozen=True)
+class StructuralMapping:
+    """One complete structure-preserving bijection between two scenes."""
+
+    matches: tuple[StructuralObjectMatch, ...]
+
+
+@dataclass(frozen=True)
+class StructuralMatchingResult:
+    """Result of structural matching between demonstration and runtime scenes."""
+
+    # All bijections that preserve the complete qualitative spatial structure.
+    valid_mappings: tuple[StructuralMapping, ...]
+
+    @property
+    def is_valid(self) -> bool:
+        """Return whether at least one structure-preserving mapping exists."""
+        return bool(self.valid_mappings)
+
+    @property
+    def is_unique(self) -> bool:
+        """Return whether exactly one structure-preserving mapping exists."""
+        return len(self.valid_mappings) == 1
+
+@dataclass(frozen=True)
+class ResolvedActionTargets:
+    """Runtime targets resolved for one demonstrated manipulation step."""
+
+    # Index of the corresponding ActionStep in the ActionPlanningResult.
+    action_step_index: int
+
+    # Runtime SceneObject corresponding to the demonstrated picked object.
+    runtime_pick_object_id: str
+
+    # Runtime SceneObject corresponding to the demonstrated place destination.
+    runtime_place_object_id: str
+
+
+@dataclass(frozen=True)
+class ReplicabilityResult:
+    """Result of checking whether the demonstrated task can be reproduced."""
+
+    # True only when every demonstrated action can be resolved and executed
+    # according to the supported task semantics.
+    replicable: bool
+
+    # Runtime targets resolved for every demonstrated action step.
+    # Empty when the task is not replicable.
+    resolved_targets: tuple[ResolvedActionTargets, ...]
+
+    # Human-readable explanations when replicability fails.
+    failure_reasons: tuple[str, ...]
 
 @dataclass(frozen=True)
 class SceneObject:

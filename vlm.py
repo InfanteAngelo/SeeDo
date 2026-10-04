@@ -14,6 +14,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from dataclasses import asdict
 
 import cv2
 
@@ -79,6 +80,89 @@ PLAN_SCHEMA: dict[str, Any] = {
             "ambiguities": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["steps", "status", "ambiguities", "task_type"],
+        "additionalProperties": False,
+    },
+}
+
+GENERALIZED_PLAN_SCHEMA: dict[str, Any] = {
+    "name": "seedo_generalized_action_plan",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "pick_keyframe": {
+                            "type": "integer"
+                        },
+                        "place_keyframe": {
+                            "type": "integer"
+                        },
+                        "picked_track_id": {
+                            "type": "integer"
+                        },
+                        "picked_category": {
+                            "type": "string"
+                        },
+                        "picked_color": {
+                            "type": "string"
+                        },
+                        "picked_detector_label": {
+                            "type": "string"
+                        },
+                        "destination_track_id": {
+                            "type": "integer"
+                        },
+                        "destination_category": {
+                            "type": "string"
+                        },
+                        "relation": {
+                            "type": "string"
+                        },
+                    },
+                    "required": [
+                        "pick_keyframe",
+                        "place_keyframe",
+                        "picked_track_id",
+                        "picked_category",
+                        "picked_color",
+                        "picked_detector_label",
+                        "destination_track_id",
+                        "destination_category",
+                        "relation",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "status": {
+                "type": "string",
+                "enum": [
+                    "completed",
+                    "ambiguous",
+                ],
+            },
+            "task_type": {
+                "type": "string",
+                "enum": list(all_task_values()),
+            },
+            "ambiguities": {
+                "type": "array",
+                "items": {
+                    "type": "string"
+                },
+            },
+        },
+        "required": [
+            "steps",
+            "status",
+            "ambiguities",
+            "task_type",
+        ],
         "additionalProperties": False,
     },
 }
@@ -206,12 +290,6 @@ def build_prompt(
             "Invalid demonstration_bin_order: "
             f"{demonstration_bin_order!r}"
         )
-
-    generalized_order_direction = (
-        "ascending"
-        if demonstration_bin_order == "left_to_right"
-        else "descending"
-    )
     
     evidence = {
         "frame_roles": {
@@ -305,21 +383,6 @@ def build_prompt(
         "Set destination_category to that exact category, "
         "NOT to the detector_label. "
 
-        "DESTINATION ORDINAL: "
-        "Consider ALL tracks whose category is exactly equal to "
-        "the selected destination's category, regardless of their "
-        "detector_label or attributes. "
-        "Use the place-frame x coordinates of these tracks. "
-        "Sort them in "
-        f"{generalized_order_direction} order. "
-        "Set destination_ordinal_from_left to the selected "
-        "destination's one-based position in this sorted list. "
-        "If it is the only object in its category, use ordinal 1. "
-        "Never derive an ordinal from track IDs, JSON order, "
-        "detection order or object naming. "
-        "If required coordinates are missing or the ordering "
-        "cannot be established reliably, report ambiguity. "
-
         "RELATION: "
         "Infer the spatial or functional placement relation "
         "from the observed interaction. "
@@ -327,55 +390,15 @@ def build_prompt(
         "Use a concise relation supported by the video. "
         "Do not invent an unsupported relation. "
 
-        "ACTION DESCRIPTION: "
-        "Generate one complete natural-language imperative describing "
-        "both the picking and the placement. "
-        "The sentence MUST begin with 'Pick the' and continue "
-        "with 'and place it'. "
-        "Use the exact detector_label of the picked track and the "
-        "exact detector_label of the destination track. "
-
-        "The destination description MUST be constructed from "
-        "destination_category and destination_ordinal_from_left. "
-        "Count all tracks belonging to the same destination category. "
-
-        "If multiple tracks belong to that category, ALWAYS include "
-        "the ordinal position in the action sentence, even if the "
-        "destination appears visually obvious or uniquely identifiable "
-        "from the interaction. "
-        "Convert destination_ordinal_from_left into an English ordinal "
-        "word such as 'first', 'second', 'third', or 'fourth'. "
-        "Place the ordinal BEFORE the exact destination detector_label "
-        "and append 'from the left'. "
-        "Never omit the ordinal when multiple objects share the category. "
-        "Never replace the ordinal with a numeric index or a generic "
-        "destination description. "
-
-        "For multiple destinations, follow this exact template: "
-        "'Pick the <picked detector_label> and place it <relation> "
-        "the <ordinal word> <destination detector_label> from the left.' "
-
-        "For example, when picked detector_label is 'green cube', "
-        "destination detector_label is 'wooden box', "
-        "destination_ordinal_from_left is 1, and relation is 'in', "
-        "the action MUST be: "
-        "'Pick the green cube and place it in the first wooden box "
-        "from the left.' "
-        "The sentence 'Pick the green cube and place it in the wooden box.' "
-        "is INVALID when multiple objects belong to the box category. "
-
-        "If the destination is the only object in its category, "
-        "use its exact detector_label without an ordinal. "
-        "Follow this template: "
-        "'Pick the <picked detector_label> and place it <relation> "
-        "the <destination detector_label>.' "
-
-        "Use the placement relation inferred from the video. "
-        "Do not assume that the relation is always 'in' or 'on'. "
-        "Ensure that the action sentence is consistent with "
-        "picked_track_id, destination_track_id, destination_category, "
-        "destination_ordinal_from_left and relation. "
-        "Do not replace object categories with unsupported synonyms. "
+        "OUTPUT SEMANTICS: "
+        "Return only the structured information required to identify "
+        "the demonstrated manipulation. "
+        "Do not construct a natural-language action description. "
+        "The final action sentence will be generated deterministically "
+        "from the selected tracks and their place-frame coordinates. "
+        "Ensure that picked_track_id, destination_track_id, "
+        "destination_category and relation are mutually consistent "
+        "with the supplied visual and tracking evidence. "
 
         "GENERAL RULES: "
         "Track IDs must come exclusively from the supplied tracking evidence. "
@@ -625,17 +648,8 @@ def validate_plan(
             )
 
         # -----------------------------------------------------
-        # Destination ordinal: deterministic spatial validation
+        # Destination center: deterministic coordinate validation
         # -----------------------------------------------------
-
-        if demonstration_bin_order not in {
-            "left_to_right",
-            "right_to_left",
-        }:
-            raise ValueError(
-                "Invalid demonstration_bin_order: "
-                f"{demonstration_bin_order!r}"
-            )
 
         place_coordinates = coordinates.get(
             str(place_frame)
@@ -646,74 +660,24 @@ def validate_plan(
                 "Missing place-frame coordinates."
             )
 
-        # Include every track belonging to the same category,
-        # independently of detector_label and attributes.
-        category_track_ids = [
-            track_id
-            for track_id, info in track_map.items()
-            if str(
-                info.get("category", "")
-            ).strip().lower() == destination_category
-        ]
-
-        if destination_track_id not in category_track_ids:
+        if destination_track_id not in place_coordinates:
             raise ValueError(
-                "Destination track is missing from its category."
+                "Missing place-frame coordinates for selected "
+                f"destination track {destination_track_id!r}."
             )
 
-        missing_coordinates = [
-            track_id
-            for track_id in category_track_ids
-            if track_id not in place_coordinates
+        destination_center = place_coordinates[
+            destination_track_id
         ]
-
-        if missing_coordinates:
-            raise ValueError(
-                "Missing place-frame coordinates for "
-                f"destination-category tracks: {missing_coordinates}"
-            )
-
-        # Identical x coordinates make a strict left/right
-        # ordinal ambiguous.
-        x_coordinates = [
-            place_coordinates[track_id][0]
-            for track_id in category_track_ids
-        ]
-
-        if len(x_coordinates) != len(set(x_coordinates)):
-            raise ValueError(
-                "Destination-category ordering is ambiguous: "
-                "two or more tracks have identical x coordinates."
-            )
-
-        reverse_order = (
-            demonstration_bin_order == "right_to_left"
-        )
-
-        ordered_track_ids = sorted(
-            category_track_ids,
-            key=lambda track_id: (
-                place_coordinates[track_id][0]
-            ),
-            reverse=reverse_order,
-        )
-
-        expected_ordinal = (
-            ordered_track_ids.index(
-                destination_track_id
-            ) + 1
-        )
 
         if (
-            step["destination_ordinal_from_left"]
-            != expected_ordinal
+            not isinstance(destination_center, (list, tuple))
+            or len(destination_center) != 2
         ):
             raise ValueError(
-                "Destination ordinal mismatch: "
-                f"expected={expected_ordinal}, "
-                f"received="
-                f"{step['destination_ordinal_from_left']}, "
-                f"ordered_tracks={ordered_track_ids}"
+                "Invalid place-frame center for selected "
+                f"destination track {destination_track_id!r}: "
+                f"{destination_center!r}"
             )
 
         return
@@ -966,6 +930,11 @@ def generate_action_plan(
 
         from openai import OpenAI
 
+        if perception_mode == "generalized":
+            response_schema = GENERALIZED_PLAN_SCHEMA
+        else:
+            response_schema = PLAN_SCHEMA
+
         response = OpenAI().chat.completions.create(
             model=model,
             messages=messages,
@@ -973,7 +942,7 @@ def generate_action_plan(
             max_tokens=800,
             response_format={
                 "type": "json_schema",
-                "json_schema": PLAN_SCHEMA,
+                "json_schema": response_schema,
             },
         )
 
@@ -1032,34 +1001,161 @@ def generate_action_plan(
         raw_output.rstrip() + "\n"
     )
 
-    write_json(
-        output_dir / "action_plan.json",
-        plan,
-    )
+    action_steps_list: list[ActionStep] = []
+
+    for step in plan["steps"]:
+
+        if perception_mode == "generalized":
+            destination_track_id = str(
+                step["destination_track_id"]
+            )
+
+            place_coordinates = normalized_coordinates[
+                str(place_frame)
+            ]
+
+            destination_center = place_coordinates[
+                destination_track_id
+            ]
+
+            destination_x = int(
+                destination_center[0]
+            )
+
+            destination_y = int(
+                destination_center[1]
+            )
+
+            picked_detector_label = str(
+                step["picked_detector_label"]
+            ).strip()
+
+            destination_detector_label = str(
+                normalized_track_map[
+                    destination_track_id
+                ].get(
+                    "detector_label",
+                    "",
+                )
+            ).strip()
+
+            if not destination_detector_label:
+                raise ValueError(
+                    "Selected destination track has no "
+                    "detector_label."
+                )
+
+            relation = str(
+                step["relation"]
+            ).strip().lower()
+
+            task_type = str(
+                plan["task_type"]
+            ).strip().lower()
+
+            if task_type == TaskType.PICK_AND_PLACE.value:
+                if relation == "in":
+                    action_verb = "place it into"
+                elif relation == "on":
+                    action_verb = "place it onto"
+                else:
+                    action_verb = (
+                        f"place it {relation}"
+                    )
+
+            elif task_type == TaskType.NUT_ASSEMBLY.value:
+                action_verb = "assemble it onto"
+
+            else:
+                raise ValueError(
+                    "Cannot generate a deterministic action "
+                    f"description for task type {task_type!r}."
+                )
+
+            action = (
+                f"Pick the {picked_detector_label} and "
+                f"{action_verb} the "
+                f"{destination_detector_label} centered at "
+                f"(x={destination_x}, y={destination_y}) "
+                "in the demonstration place frame."
+            )
+
+            action_steps_list.append(
+                ActionStep(
+                    pick_keyframe=int(
+                        step["pick_keyframe"]
+                    ),
+                    place_keyframe=int(
+                        step["place_keyframe"]
+                    ),
+                    picked_track_id=int(
+                        step["picked_track_id"]
+                    ),
+                    picked_category=str(
+                        step["picked_category"]
+                    ),
+                    picked_color=str(
+                        step["picked_color"]
+                    ),
+                    destination_track_id=int(
+                        step["destination_track_id"]
+                    ),
+                    destination_category=str(
+                        step["destination_category"]
+                    ),
+                    destination_ordinal_from_left=None,
+                    relation=str(
+                        step["relation"]
+                    ),
+                    action=action,
+                    picked_detector_label=(
+                        picked_detector_label
+                    ),
+                )
+            )
+
+        else:
+            # Preserve the original prior-guided behavior.
+            action_steps_list.append(
+                ActionStep(
+                    pick_keyframe=int(
+                        step["pick_keyframe"]
+                    ),
+                    place_keyframe=int(
+                        step["place_keyframe"]
+                    ),
+                    picked_track_id=int(
+                        step["picked_track_id"]
+                    ),
+                    picked_category=str(
+                        step["picked_category"]
+                    ),
+                    picked_color=str(
+                        step["picked_color"]
+                    ),
+                    destination_track_id=int(
+                        step["destination_track_id"]
+                    ),
+                    destination_category=str(
+                        step["destination_category"]
+                    ),
+                    destination_ordinal_from_left=int(
+                        step["destination_ordinal_from_left"]
+                    ),
+                    relation=str(
+                        step["relation"]
+                    ),
+                    action=str(
+                        step["action"]
+                    ),
+                    picked_detector_label=str(
+                        step["picked_detector_label"]
+                    ),
+                )
+            )
 
     action_steps = tuple(
-        ActionStep(
-            pick_keyframe=int(step["pick_keyframe"]),
-            place_keyframe=int(step["place_keyframe"]),
-            picked_track_id=int(step["picked_track_id"]),
-            picked_category=str(step["picked_category"]),
-            picked_color=str(step["picked_color"]),
-            destination_track_id=int(
-                step["destination_track_id"]
-            ),
-            destination_category=str(
-                step["destination_category"]
-            ),
-            destination_ordinal_from_left=int(
-                step["destination_ordinal_from_left"]
-            ),
-            relation=str(step["relation"]),
-            action=str(step["action"]),
-            picked_detector_label=str(
-                step["picked_detector_label"]
-            ),
-        )
-        for step in plan["steps"]
+        action_steps_list
     )
 
     if action_steps:
@@ -1086,6 +1182,11 @@ def generate_action_plan(
         ),
         natural_language_plan=natural_language_plan,
         task_type=str(plan["task_type"]),
+    )
+
+    write_json(
+        output_dir / "action_plan.json",
+        asdict(result),
     )
 
     print(
