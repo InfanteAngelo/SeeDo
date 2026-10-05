@@ -49,6 +49,11 @@ sys.path.append(os.path.join(os.getcwd(), "GroundingDINO"))
 
 from ai_controller.models.seedo_controller.timing_utils import TIMING
 
+from ai_controller.models.seedo_controller.utils import (
+    crop_image_for_grounding_dino,
+    remap_grounding_dino_boxes_to_full_frame,
+)
+
 GENERALIZED_DISCOVERY_SYSTEM_PROMPT = (
     "You are a visual object discovery system. "
     "Identify the task-relevant physical objects "
@@ -1329,6 +1334,7 @@ def run_visual_prompting(
     sam_checkpoint="sam_vit_h_4b8939.pth",
     sam2_checkpoint="segment-anything-2/checkpoints/sam2_hiera_large.pt",
     perception_mode="generalized",
+    grounding_dino_crop=None,
 ):  
     key_frames = ast.literal_eval(key_frames)
     artifacts_dir = os.path.abspath(artifacts_dir)
@@ -1486,23 +1492,33 @@ def run_visual_prompting(
     # processing.
     image_source = frames[0]
 
-    # Crop only the upper part of the image seen by GroundingDINO.
-    dino_crop_top = 80
+    # GroundingDINO sees only the configured ROI.
+    # SAM, SAM2 and all downstream processing keep using the
+    # complete frame.
+    dino_crop_config = grounding_dino_crop or {}
 
-    if (
-        dino_crop_top < 0
-        or dino_crop_top >= image_source.shape[0]
-    ):
-        raise ValueError(
-            "Invalid GroundingDINO crop: "
-            f"crop_top={dino_crop_top}, "
-            f"image_height={image_source.shape[0]}"
-        )
-
-    dino_image_source = image_source[
-        dino_crop_top:,
-        :
-    ]
+    (
+        dino_image_source,
+        dino_crop_info,
+    ) = crop_image_for_grounding_dino(
+        image_source,
+        top_px=dino_crop_config.get(
+            "top_px",
+            80,
+        ),
+        bottom_px=dino_crop_config.get(
+            "bottom_px",
+            0,
+        ),
+        left_px=dino_crop_config.get(
+            "left_px",
+            0,
+        ),
+        right_px=dino_crop_config.get(
+            "right_px",
+            0,
+        ),
+    )
 
     dino_input_path = (
         Path(artifacts_dir)
@@ -1530,11 +1546,14 @@ def run_visual_prompting(
 
     print(
         "[visual_prompting] GroundingDINO crop: "
-        f"top={dino_crop_top}px | "
-        f"full={image_source.shape[1]}x"
-        f"{image_source.shape[0]} | "
-        f"dino={dino_image_source.shape[1]}x"
-        f"{dino_image_source.shape[0]}"
+        f"top={dino_crop_info['top_px']}px | "
+        f"bottom={dino_crop_info['bottom_px']}px | "
+        f"left={dino_crop_info['left_px']}px | "
+        f"right={dino_crop_info['right_px']}px | "
+        f"full={dino_crop_info['full_width']}x"
+        f"{dino_crop_info['full_height']} | "
+        f"dino={dino_crop_info['crop_width']}x"
+        f"{dino_crop_info['crop_height']}"
     )
 
     best_boxes = []
@@ -2308,23 +2327,9 @@ def run_visual_prompting(
     # GroundingDINO boxes are normalized with respect to the
     # cropped image. Convert them back to normalized coordinates
     # of the complete frame before SAM and SAM2 use them.
-
-    full_height = image_source.shape[0]
-    crop_height = dino_image_source.shape[0]
-
-    best_boxes = best_boxes.clone()
-
-    # cy: crop-normalized -> full-frame normalized
-    best_boxes[:, 1] = (
-        best_boxes[:, 1] * crop_height
-        + dino_crop_top
-    ) / full_height
-
-    # h: crop-normalized -> full-frame normalized
-    best_boxes[:, 3] = (
-        best_boxes[:, 3]
-        * crop_height
-        / full_height
+    best_boxes = remap_grounding_dino_boxes_to_full_frame(
+        best_boxes,
+        crop_info=dino_crop_info,
     )
 
     annotated_frame = my_annotate(
