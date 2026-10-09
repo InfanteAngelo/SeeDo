@@ -87,6 +87,11 @@ class ActionStep:
     # Empty only for legacy action plans.
     picked_detector_label: str = ""
 
+    # Natural-language instruction describing where/how the picked
+    # object should be grasped. This is later used by the runtime
+    # task-oriented grasp selector.
+    grasp_instruction: str = ""
+
 
 @dataclass(frozen=True)
 class ActionPlanningResult:

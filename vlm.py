@@ -115,6 +115,9 @@ GENERALIZED_PLAN_SCHEMA: dict[str, Any] = {
                         "picked_detector_label": {
                             "type": "string"
                         },
+                        "grasp_instruction": {
+                            "type": "string"
+                        },
                         "destination_track_id": {
                             "type": "integer"
                         },
@@ -132,6 +135,7 @@ GENERALIZED_PLAN_SCHEMA: dict[str, Any] = {
                         "picked_category",
                         "picked_color",
                         "picked_detector_label",
+                        "grasp_instruction",
                         "destination_track_id",
                         "destination_category",
                         "relation",
@@ -364,6 +368,84 @@ def build_prompt(
         "Set picked_color to an empty string. "
         "The picked_color field is retained only for backward compatibility "
         "and must not be used to identify the picked object. "
+
+        "GRASP INSTRUCTION: "
+        "Generate one short grasp instruction for the selected picked object. "
+        "The picked_detector_label identifies which object to describe, but it "
+        "MUST NOT be used to infer the object's grasp geometry. "
+        "Determine the grasp geometry only from the supplied image. "
+
+        "Before writing the instruction, visually inspect the picked object and "
+        "apply the following decision procedure internally: "
+
+        "STEP 1 - FIND DISTINCT PARTS: "
+        "Check whether the object has a visually distinct solid appendage or "
+        "subpart connected to its main body. "
+        "Examples include a handle, grip, stem, tab, neck, narrow extension, "
+        "or protruding part. "
+        "A distinct part should be considered separately from the main body "
+        "even if the picked_detector_label does not mention it. "
+
+        "STEP 2 - CHECK THE MAIN BODY: "
+        "Check whether the main body is simple and solid, or instead contains "
+        "a hole, hollow center, loop, circular opening, cavity, or ring-shaped "
+        "region. "
+
+        "STEP 3 - CHOOSE THE OUTPUT FORM: "
+
+        "If a distinct graspable part is visible AND the main body is hollow, "
+        "ring-shaped, circular, or otherwise likely to be confused with the "
+        "graspable part, use exactly this structure: "
+        "'Pick up the <picked_detector_label> by grasping its <distinct part>, "
+        "not the <main body>.' "
+
+        "If a distinct graspable part is visible but the main body is simple, "
+        "use: "
+        "'Pick up the <picked_detector_label> by grasping its <distinct part>.' "
+
+        "If no distinct graspable part is visible and the object is a simple "
+        "solid object, use only: "
+        "'Pick up the <picked_detector_label>.' "
+
+        "IMPORTANT: "
+        "Do not classify the object as simple until you have explicitly checked "
+        "for connected protrusions, handles, stems, tabs, grips, or other "
+        "visually distinct subparts. "
+        "Do not use the picked_detector_label itself as evidence that the object "
+        "is simple. "
+
+        "Holes, hollow centers, openings, cavities, and empty image regions are "
+        "never graspable parts. "
+
+        "Do not use vague expressions such as 'outer edge', 'outer rim', "
+        "'outer part', 'solid part', or 'stable grasp' when a distinct subpart "
+        "is visible. "
+        "If a narrow or protruding connected part is visible, name that part "
+        "instead. "
+
+        "FEW-SHOT EXAMPLES: "
+
+        "Image geometry: simple solid block, no distinct subparts. "
+        "picked_detector_label = 'purple block' "
+        "Output: 'Pick up the purple block.' "
+
+        "Image geometry: container with a distinct handle. "
+        "picked_detector_label = 'container' "
+        "Output: 'Pick up the container by grasping its handle.' "
+
+        "Image geometry: circular or ring-shaped body with a distinct attached "
+        "handle-like appendage. "
+        "picked_detector_label = 'purple ring' "
+        "Output: 'Pick up the purple ring by grasping its handle, "
+        "not the circular ring body.' "
+
+        "Image geometry: main body with a distinct narrow stem. "
+        "picked_detector_label = 'tool' "
+        "Output: 'Pick up the tool by grasping its stem.' "
+
+        "Return exactly one imperative sentence in grasp_instruction. "
+        "Do not add explanations, reasoning, coordinates, robot poses, "
+        "orientations, approach directions, or gripper parameters."
 
         "DESTINATION: "
         "In the place-event frame, identify the tracked object that "
@@ -600,6 +682,27 @@ def validate_plan(
         destination_info = track_map[
             destination_track_id
         ]
+
+        grasp_instruction = str(
+            step.get(
+                "grasp_instruction",
+                "",
+            )
+        ).strip()
+
+        if not grasp_instruction:
+            raise ValueError(
+                "The completed generalized action plan contains an empty "
+                "grasp_instruction."
+            )
+
+        if expected_label.casefold() not in grasp_instruction.casefold():
+            raise ValueError(
+                "grasp_instruction must explicitly name the exact "
+                "picked_detector_label: "
+                f"expected label={expected_label!r}, "
+                f"instruction={grasp_instruction!r}"
+            )
 
         # -----------------------------------------------------
         # Picked object: authoritative structured metadata
@@ -1111,6 +1214,9 @@ def generate_action_plan(
                     picked_detector_label=(
                         picked_detector_label
                     ),
+                    grasp_instruction=str(
+                        step["grasp_instruction"]
+                    ).strip(),
                 )
             )
 
@@ -1150,6 +1256,12 @@ def generate_action_plan(
                     ),
                     picked_detector_label=str(
                         step["picked_detector_label"]
+                    ),
+                    grasp_instruction=str(
+                        step.get(
+                            "grasp_instruction",
+                            "",
+                        )
                     ),
                 )
             )
