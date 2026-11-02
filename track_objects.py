@@ -171,6 +171,7 @@ def get_object_list(
     video_path,
     client,
     perception_mode="generalized",
+    prior_guided_task=None,
 ):
 
     perception_mode = str(perception_mode).strip().lower()
@@ -180,6 +181,23 @@ def get_object_list(
             "Invalid perception_mode: "
             f"{perception_mode!r}"
         )
+
+    if perception_mode == "prior_guided":
+
+        prior_guided_task = str(
+            prior_guided_task
+        ).strip().lower()
+
+        if prior_guided_task not in {
+            "pick_and_place",
+            "nut_assembly",
+        }:
+            raise ValueError(
+                "Invalid prior_guided_task: "
+                f"{prior_guided_task!r}. "
+                "Expected 'pick_and_place' or "
+                "'nut_assembly'."
+            )
     # Use the first frame for encoding
     video = cv2.VideoCapture(video_path)
 
@@ -218,7 +236,7 @@ def get_object_list(
         },
     ]
 
-    prior_guided_prompt_messages = [
+    prior_guided_pick_and_place_prompt_messages = [
         {
             "role": "system",
             "content": [
@@ -304,14 +322,119 @@ def get_object_list(
         },
     ]
 
+    prior_guided_nut_assembly_prompt_messages = [
+        {
+            "role": "system",
+            "content": [
+                (
+                    "You are a visual object detector whose output "
+                    "will be used directly as text queries for "
+                    "GroundingDINO."
+                ),
+                (
+                    "The scene contains colored rings and wooden pegs. "
+                    "For every ring, include its visible color in the "
+                    "detector label using the exact form '<color> ring'. "
+                    "The only valid ring colors in this benchmark are: "
+                    "gray, yellow, and blue. "
+                    "For every ring, the detector label MUST therefore "
+                    "be exactly one of: 'gray ring', 'yellow ring', "
+                    "or 'blue ring'. "
+                    "Do not use any other ring color. "
+                    "For every wooden peg, always use the exact "
+                    "detector label 'wooden peg' without adding color, "
+                    "position, material, or other attributes."
+                ),
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                (
+                    "Inspect the physical objects visible on the desk "
+                    "and classify them using these rules:"
+                ),
+                (
+                    "1. For every visible ring, identify its visible "
+                    "color and return '<color> ring'."
+                ),
+                (
+                    "2. Examples of valid ring labels are 'gray ring', "
+                    "'yellow ring', and 'blue ring'."
+                ),
+                (
+                    "3. For every visible peg, return exactly "
+                    "'wooden peg'."
+                ),
+                "4. Count every physical instance separately.",
+                (
+                    "5. Repeat 'wooden peg' once for every visible "
+                    "wooden-peg instance."
+                ),
+                (
+                    "6. Do not include hands, grippers, people, "
+                    "the table, or background objects."
+                ),
+                (
+                    "7. Do not assign spatial descriptions such as "
+                    "'first peg from the left' or "
+                    "'second peg from the left'."
+                ),
+                "8. Do not add objects that are not visible.",
+                (
+                    "Return exactly two lines and no additional "
+                    "explanation:"
+                ),
+                "Number: <total number of instances>",
+                (
+                    "Objects: <comma-separated detector labels, "
+                    "repeated once per instance>"
+                ),
+                "Example:",
+                "Number: 4",
+                (
+                    "Objects: gray ring, wooden peg, "
+                    "wooden peg, wooden peg"
+                ),
+                *map(
+                    lambda x: {
+                        "image": x,
+                        "resize": 768,
+                    },
+                    base64Frames[0:1],
+                ),
+            ],
+        },
+    ]
+
     # ---------------------------------------------------------
     # Select object-discovery prompt
     # ---------------------------------------------------------
 
     if perception_mode == "generalized":
-        prompt_messages_state = generalized_prompt_messages
+
+        prompt_messages_state = (
+            generalized_prompt_messages
+        )
+
+    elif prior_guided_task == "pick_and_place":
+
+        prompt_messages_state = (
+            prior_guided_pick_and_place_prompt_messages
+        )
+
+    elif prior_guided_task == "nut_assembly":
+
+        prompt_messages_state = (
+            prior_guided_nut_assembly_prompt_messages
+        )
+
     else:
-        prompt_messages_state = prior_guided_prompt_messages
+
+        raise ValueError(
+            "Invalid prior_guided_task: "
+            f"{prior_guided_task!r}"
+        )
 
     print(
         "[visual_prompting] Perception mode: "
@@ -1473,6 +1596,7 @@ def run_visual_prompting(
     sam_checkpoint="sam_vit_h_4b8939.pth",
     sam2_checkpoint="segment-anything-2/checkpoints/sam2_hiera_large.pt",
     perception_mode="generalized",
+    prior_guided_task=None,
     grounding_dino_crop=None,
 ):  
     key_frames = ast.literal_eval(key_frames)
@@ -1503,6 +1627,7 @@ def run_visual_prompting(
             input_video_path,
             client,
             perception_mode=perception_mode,
+            prior_guided_task=prior_guided_task,
         )
         if perception_mode == "generalized":
 

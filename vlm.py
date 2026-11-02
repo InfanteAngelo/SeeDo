@@ -253,6 +253,7 @@ def build_prompt(
     coordinates: dict[str, Any],
     demonstration_bin_order: str = "left_to_right",
     perception_mode: str = "generalized",
+    prior_guided_task: str | None = None,
 ) -> str:
 
     perception_mode = str(perception_mode).strip().lower()
@@ -261,6 +262,21 @@ def build_prompt(
             "Invalid perception_mode: "
             f"{perception_mode!r}"
         )
+
+    if perception_mode == "prior_guided":
+
+        prior_guided_task = str(
+            prior_guided_task
+        ).strip().lower()
+
+        if prior_guided_task not in {
+            "pick_and_place",
+            "nut_assembly",
+        }:
+            raise ValueError(
+                "Invalid prior_guided_task: "
+                f"{prior_guided_task!r}"
+            )
 
     demonstration_bin_order = (
         str(demonstration_bin_order)
@@ -278,6 +294,15 @@ def build_prompt(
             "smallest x corresponds to the second, and so on. "
         )
 
+        peg_order_instruction = (
+            "Only after fixing the destination track ID, sort all wooden pegs "
+            "by their place-frame x coordinate in ascending order. "
+            "The destination ordinal is the one-based position of the selected "
+            "track ID in that sorted list: smallest x corresponds to the first "
+            "peg from the left in the canonical front view, the next "
+            "smallest x corresponds to the second, and so on. "
+        )
+
     elif demonstration_bin_order == "right_to_left":
         bin_order_instruction = (
             "The demonstration is observed from the opposite side relative to "
@@ -286,6 +311,16 @@ def build_prompt(
             "order. The destination ordinal is the one-based position of the "
             "selected track ID in that sorted list: largest x corresponds to the "
             "first storage bin from the left in the canonical front view, the next "
+            "largest x corresponds to the second, and so on. "
+        )
+
+        peg_order_instruction = (
+            "The demonstration is observed from the opposite side relative to "
+            "the canonical front view. Only after fixing the destination track ID, "
+            "sort all wooden pegs by their place-frame x coordinate in descending "
+            "order. The destination ordinal is the one-based position of the "
+            "selected track ID in that sorted list: largest x corresponds to the "
+            "first peg from the left in the canonical front view, the next "
             "largest x corresponds to the second, and so on. "
         )
 
@@ -491,7 +526,7 @@ def build_prompt(
         "Return only data matching the requested JSON schema."
     )
 
-    prior_guided_prompt = (
+    prior_guided_pick_and_place_prompt = (
         "Infer one pick-and-place action from the three chronologically ordered "
         "annotated frames and the tracking evidence below. The domain contains "
         "cubes and storage bins. Use each frame only for its assigned role. Treat the "
@@ -531,14 +566,91 @@ def build_prompt(
         "Return only data matching the requested JSON schema."
     )
 
+    prior_guided_nut_assembly_prompt = (
+        "Infer one nut-assembly action from the three chronologically ordered "
+        "annotated frames and the tracking evidence below. The domain contains "
+        "colored rings and wooden pegs. Use each frame only for its assigned role. "
+        "Treat the initial-scene frame as general scene context only; do not use "
+        "it to decide the picked track ID or destination. "
+
+        "In the pick-event frame, first identify the track ID of the ring "
+        "physically grasped or manipulated by the hand. "
+        "Do not select a ring merely because of its colour or position. "
+
+        "After selecting the picked track ID, obtain the picked object's semantic "
+        "identity exclusively from that track ID's 'detector_label' in track_id_map. "
+        "Set picked_detector_label to the exact detector_label stored in "
+        "track_id_map for the selected picked track. "
+
+        "Ring detector labels already contain the semantic colour in the exact form "
+        "'<colour> ring', for example 'gray ring', 'yellow ring', or 'blue ring'. "
+        "Do not visually infer, verify, or change the ring colour from any video "
+        "frame. The GroundingDINO detector label is the authoritative source for "
+        "the picked object's colour and category. "
+
+        "Set picked_color to the colour contained in that detector label and "
+        "picked_category to 'ring'. "
+
+        "In the place-event frame, first obtain the centre of the picked ring "
+        "and the centre of every object labelled 'wooden peg' from that frame's "
+        "coordinates. "
+
+        "For the relation 'on', select the wooden-peg track ID onto which the "
+        "ring is visually assembled and that has the smallest centre-to-centre "
+        "distance from it. When coordinates are available, compare all candidate "
+        "distances and do not select a farther peg unless the image clearly "
+        "contradicts the coordinates. "
+
+        + peg_order_instruction +
+
+        "Never infer the destination or its ordinal from track ID, JSON order, "
+        "or list order. "
+
+        "If the picked ring has no place-frame coordinates, or image and "
+        "coordinates conflict, report ambiguity. Track IDs must be copied from "
+        "the annotations/evidence. "
+
+        "The relation for assembling a ring onto a wooden peg is 'on'. "
+        "Set destination_category to 'peg'. "
+        "Set task_type to 'nut_assembly'. "
+
+        "Do not infer anything from a task or trajectory name. "
+        "If evidence is insufficient, set status to 'ambiguous' and explain "
+        "why in ambiguities. "
+
+        "The action field must be a complete, natural-language imperative "
+        "sentence that explicitly names the picked object's labelled colour "
+        "and category and the destination peg's ordinal position from the left. "
+        "Never use a generic label such as 'nut-assembly'. "
+
+        "Follow this form: 'Pick the <colour> <picked category> and assemble it "
+        "onto the <ordinal> peg from the left.' "
+
+        "Return only data matching the requested JSON schema."
+    )
+
     # ---------------------------------------------------------
     # Select action-planning prompt
     # ---------------------------------------------------------
 
     if perception_mode == "generalized":
+
         prompt = generalized_prompt
+
+    elif prior_guided_task == "pick_and_place":
+
+        prompt = prior_guided_pick_and_place_prompt
+
+    elif prior_guided_task == "nut_assembly":
+
+        prompt = prior_guided_nut_assembly_prompt
+
     else:
-        prompt = prior_guided_prompt
+
+        raise ValueError(
+            "Invalid prior_guided_task: "
+            f"{prior_guided_task!r}"
+        )
 
     return (
         prompt
@@ -586,6 +698,7 @@ def validate_plan(
     coordinates: dict[str, dict[str, list[int]]],
     demonstration_bin_order: str,
     perception_mode: str,
+    prior_guided_task: str | None = None,
 ) -> None:
     steps = plan.get("steps")
     if not isinstance(steps, list):
@@ -803,14 +916,89 @@ def validate_plan(
 
     label_parts = detector_label.split(maxsplit=1)
 
-    if detector_label == "storage bin" or len(label_parts) != 2:
-        raise ValueError(
-            "Picked track does not have a valid semantic object "
-            "detector label in '<colour> <object type>' format: "
-            f"{detector_label!r}"
-        )
+    if prior_guided_task == "nut_assembly":
+
+        if detector_label == "wooden peg" or len(label_parts) != 2:
+            raise ValueError(
+                "Picked track does not have a valid ring "
+                "detector label in '<colour> ring' format: "
+                f"{detector_label!r}"
+            )
+
+    else:
+
+        if detector_label == "storage bin" or len(label_parts) != 2:
+            raise ValueError(
+                "Picked track does not have a valid semantic object "
+                "detector label in '<colour> <object type>' format: "
+                f"{detector_label!r}"
+            )
 
     expected_color, expected_category = label_parts
+
+    if (
+        prior_guided_task == "nut_assembly"
+        and expected_category != "ring"
+    ):
+        raise ValueError(
+            "Prior-guided Nut-Assembly must pick a ring, "
+            f"received detector label {detector_label!r}."
+        )
+
+    if (
+        prior_guided_task == "nut_assembly"
+        and task_type != "nut_assembly"
+    ):
+        raise ValueError(
+            "Prior-guided Nut-Assembly returned an invalid "
+            f"task_type: {task_type!r}."
+        )
+
+    if prior_guided_task == "nut_assembly":
+
+        destination_track_id = str(
+            step["destination_track_id"]
+        )
+
+        destination_label = str(
+            track_map[
+                destination_track_id
+            ].get(
+                "detector_label",
+                "",
+            )
+        ).strip().lower()
+
+        if destination_label != "wooden peg":
+            raise ValueError(
+                "Prior-guided Nut-Assembly destination must "
+                "be a 'wooden peg', received "
+                f"{destination_label!r}."
+            )
+
+        if (
+            step.get(
+                "destination_category",
+                "",
+            ).strip().lower()
+            != "peg"
+        ):
+            raise ValueError(
+                "Prior-guided Nut-Assembly destination_category "
+                "must be 'peg'."
+            )
+
+        if (
+            step.get(
+                "relation",
+                "",
+            ).strip().lower()
+            != "on"
+        ):
+            raise ValueError(
+                "Prior-guided Nut-Assembly relation "
+                "must be 'on'."
+            )
 
     if step.get("picked_category", "").strip().lower() != expected_category:
         raise ValueError(
@@ -842,6 +1030,7 @@ def generate_action_plan(
     demonstration_bin_order: str = "left_to_right",
     dry_run: bool = False,
     perception_mode: str = "generalized",
+    prior_guided_task: str | None = None,
 ) -> ActionPlanningResult:
     """Generate a structured action plan from visual-prompting outputs."""
 
@@ -849,6 +1038,21 @@ def generate_action_plan(
     output_dir = Path(artifacts_dir).expanduser().resolve()
 
     perception_mode = str(perception_mode).strip().lower()
+
+    if perception_mode == "prior_guided":
+
+        prior_guided_task = str(
+            prior_guided_task
+        ).strip().lower()
+
+        if prior_guided_task not in {
+            "pick_and_place",
+            "nut_assembly",
+        }:
+            raise ValueError(
+                "Invalid prior_guided_task: "
+                f"{prior_guided_task!r}"
+            )
 
     if not video_path.is_file():
         raise FileNotFoundError(
@@ -960,6 +1164,7 @@ def generate_action_plan(
         coordinates=normalized_coordinates,
         demonstration_bin_order=demonstration_bin_order,
         perception_mode=perception_mode,
+        prior_guided_task=prior_guided_task,
     )
 
     manifest = {
@@ -970,6 +1175,7 @@ def generate_action_plan(
         ),
         "model": model,
         "perception_mode": perception_mode,
+        "prior_guided_task": prior_guided_task,
         "demonstration_bin_order": demonstration_bin_order,
         "input_video": str(video_path),
         "input_sha256": sha256_file(video_path),
@@ -1073,6 +1279,7 @@ def generate_action_plan(
             coordinates=normalized_coordinates,
             demonstration_bin_order=demonstration_bin_order,
             perception_mode=perception_mode,
+            prior_guided_task=prior_guided_task,
         )
 
     except Exception as error:
