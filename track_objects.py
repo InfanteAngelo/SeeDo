@@ -625,6 +625,58 @@ def detect_generalized_objects(
 
         return float(iom), float(area_similarity)
 
+    def candidate_contains(
+        container_candidate,
+        contained_candidate,
+    ):
+        """
+        Fraction of the contained candidate covered by the
+        container candidate.
+        """
+
+        container_box = box_ops.box_cxcywh_to_xyxy(
+            container_candidate["box"].unsqueeze(0)
+        )[0]
+
+        contained_box = box_ops.box_cxcywh_to_xyxy(
+            contained_candidate["box"].unsqueeze(0)
+        )[0]
+
+        intersection_min = torch.maximum(
+            container_box[:2],
+            contained_box[:2],
+        )
+
+        intersection_max = torch.minimum(
+            container_box[2:],
+            contained_box[2:],
+        )
+
+        intersection_size = (
+            intersection_max
+            - intersection_min
+        ).clamp(min=0)
+
+        intersection_area = (
+            intersection_size[0]
+            * intersection_size[1]
+        )
+
+        contained_area = (
+            (contained_box[2] - contained_box[0]).clamp(min=0)
+            * (contained_box[3] - contained_box[1]).clamp(min=0)
+        )
+
+        if contained_area.item() <= 0:
+            return 0.0
+
+        return float(
+            (
+                intersection_area
+                / contained_area
+            ).item()
+        )
+
     # ---------------------------------------------------------
     # Oversize filter and global candidate selection
     # ---------------------------------------------------------
@@ -707,6 +759,87 @@ def detect_generalized_objects(
             eligible_counts[label] = len(eligible)
 
             all_candidates.extend(eligible)
+
+        container_categories = {
+            "bin",
+            "box",
+            "container",
+            "tray",
+        }
+
+
+        filtered_candidates = []
+
+        for candidate in all_candidates:
+
+            candidate_category = (
+                metadata_by_label[
+                    candidate["label"]
+                ][
+                    "category"
+                ]
+            )
+
+            # Containers themselves are always preserved here.
+            if (
+                candidate_category
+                in container_categories
+            ):
+                filtered_candidates.append(
+                    candidate
+                )
+                continue
+
+
+            contained_containers = 0
+
+            for other in all_candidates:
+
+                if other is candidate:
+                    continue
+
+                other_category = (
+                    metadata_by_label[
+                        other["label"]
+                    ][
+                        "category"
+                    ]
+                )
+
+                if (
+                    other_category
+                    not in container_categories
+                ):
+                    continue
+
+
+                containment = candidate_contains(
+                    candidate,
+                    other,
+                )
+
+                if containment >= 0.8:
+                    contained_containers += 1
+
+
+            if contained_containers >= 2:
+
+                print(
+                    "[DETECTION FILTER] "
+                    f"{candidate['label']!r} rejected: "
+                    "candidate contains "
+                    f"{contained_containers} container detections."
+                )
+
+                continue
+
+
+            filtered_candidates.append(
+                candidate
+            )
+
+
+        all_candidates = filtered_candidates
 
         # Every category follows the same selection procedure.
         all_candidates.sort(
