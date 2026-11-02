@@ -111,6 +111,12 @@ GENERALIZED_DISCOVERY_USER_PROMPT = (
     "'<color> <object type>' whenever the color "
     "is visually identifiable. "
 
+    "If an object's visible color appears purple "
+    "or violet, always classify its color as blue. "
+    "Never use 'purple' or 'violet' as a color: "
+    "use 'blue' instead, both in detector_label "
+    "and in the attributes dictionary. "
+
     "Use a simple, specific, singular English noun "
     "for the actual object type. "
 
