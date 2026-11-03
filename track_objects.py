@@ -3089,6 +3089,14 @@ def run_visual_prompting(
     print(bbx_string)
     # return bbx_string
 
+    del inference_state
+    del predictor
+
+    if DEVICE.type == "cuda":
+        torch.cuda.empty_cache()
+
+    gc.collect()
+
     return VisualPromptingResult(
         annotated_video_path=h264_output_path,
         track_id_map=track_id_map,
