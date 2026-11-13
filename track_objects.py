@@ -1598,6 +1598,9 @@ def run_visual_prompting(
     perception_mode="generalized",
     prior_guided_task=None,
     grounding_dino_crop=None,
+    preloaded_grounding_model=None,
+    preloaded_sam_model=None,
+    models_ready_callback=None,
 ):  
     key_frames = ast.literal_eval(key_frames)
     artifacts_dir = os.path.abspath(artifacts_dir)
@@ -1705,25 +1708,57 @@ def run_visual_prompting(
     print("[visual_prompting] Selected device:", DEVICE)
     print("[visual_prompting] GPU:", torch.cuda.get_device_name(DEVICE))
 
-    if grounding_config is not None:
-        groundingdino_model = load_groundingdino_model(
-            grounding_config,
-            grounding_checkpoint,
-            device=str(DEVICE),
-            text_encoder_path=bert_model,
-        )
-    else:
-        groundingdino_model = load_model_hf(
-            "ShilongLiu/GroundingDINO",
-            "groundingdino_swinb_cogcoor.pth",
-            "GroundingDINO_SwinB.cfg.py",
-            device=str(DEVICE),
-            text_encoder_path=bert_model,
+    if preloaded_grounding_model is not None:
+
+        groundingdino_model = preloaded_grounding_model
+
+        print(
+            "[visual_prompting] Reusing cached GroundingDINO model.",
+            flush=True,
         )
 
-    sam = build_sam(checkpoint=sam_checkpoint)
-    sam.to(device=DEVICE)
-    sam_predictor = SamPredictor(sam)
+    else:
+
+        with TIMING.measure(
+            "demo.model_load.grounding_dino",
+            cuda=True,
+        ):
+
+            if grounding_config is not None:
+                groundingdino_model = load_groundingdino_model(
+                    grounding_config,
+                    grounding_checkpoint,
+                    device=str(DEVICE),
+                    text_encoder_path=bert_model,
+                )
+            else:
+                groundingdino_model = load_model_hf(
+                    "ShilongLiu/GroundingDINO",
+                    "groundingdino_swinb_cogcoor.pth",
+                    "GroundingDINO_SwinB.cfg.py",
+                    device=str(DEVICE),
+                    text_encoder_path=bert_model,
+                )
+
+    if preloaded_sam_model is not None:
+
+        sam = preloaded_sam_model
+        sam_predictor = SamPredictor(sam)
+
+        print(
+            "[visual_prompting] Reusing cached SAM model.",
+            flush=True,
+        )
+
+    else:
+
+        with TIMING.measure(
+            "demo.model_load.sam",
+            cuda=True,
+        ):
+            sam = build_sam(checkpoint=sam_checkpoint)
+            sam.to(device=DEVICE)
+            sam_predictor = SamPredictor(sam)
 
     # Stable Diffusion is not used by the current visual-prompting pipeline.
     # Keep the original loading code available for future inpainting work, but
@@ -2696,6 +2731,14 @@ def run_visual_prompting(
         "masks_after_filter": masks_after_filter,
     }
 
+    # Share model instances with the runtime ScenePerceiver
+    # before releasing the VisualPrompter local references.
+    if models_ready_callback is not None:
+        models_ready_callback(
+            groundingdino_model,
+            sam,
+        )
+
     del groundingdino_model
     del sam
     del sam_predictor
@@ -2723,11 +2766,12 @@ def run_visual_prompting(
         device_type="cuda",
         dtype=torch.bfloat16,
     ):
-        predictor = build_sam2_video_predictor(
-            model_cfg,
-            sam2_checkpoint,
-            device=DEVICE,
-        )
+        with TIMING.measure("demo.model_load.sam2_sampled", cuda=True):
+            predictor = build_sam2_video_predictor(
+                model_cfg,
+                sam2_checkpoint,
+                device=DEVICE,
+            )
 
         try:
             predictor_devices = {
@@ -2855,11 +2899,12 @@ def run_visual_prompting(
         if DEVICE.type == "cuda":
             torch.cuda.empty_cache()
 
-        predictor = build_sam2_video_predictor(
-            model_cfg,
-            sam2_checkpoint,
-            device=DEVICE,
-        )
+        with TIMING.measure("demo.model_load.sam2_full", cuda=True):
+            predictor = build_sam2_video_predictor(
+                model_cfg,
+                sam2_checkpoint,
+                device=DEVICE,
+            )
 
         try:
             predictor_devices = {
